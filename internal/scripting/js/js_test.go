@@ -558,3 +558,43 @@ func TestLaunchPadStyleFlow(t *testing.T) {
 		t.Fatalf("Iteration returned error: %v", err)
 	}
 }
+
+// ErrorLocation names the line and column of the file the author wrote, for
+// a syntax error, a throw and a failed native call, in JavaScript and
+// TypeScript, however esbuild rewrote the code.
+func TestErrorLocation(t *testing.T) {
+	cases := []struct {
+		name, file, src string
+		line, column    int
+	}{
+		{"syntax", "s.js", "export default function () {\n  let = ;\n}\n", 2, 9},
+		{"throw", "s.js", "// one\n// two\nexport default function () {\n  throw new Error(\"x\");\n}\n", 4, 9},
+		{"nested", "s.js", "function inner() {\n    null.x;\n}\nexport default function () {\n  inner();\n}\n", 2, 10},
+		{"typescript", "s.ts", "type T = { a: number };\nconst v: T = { a: 1 };\nexport default function (): void {\n  if (v.a) { throw new Error(\"ts\"); }\n}\n", 4, 20},
+		{"top level", "s.js", "\n\nthrow new Error(\"top\");\nexport default function () {}\n", 3, 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeScript(t, tc.file, tc.src)
+			script, err := Load(path)
+			if err == nil {
+				var vu *VU
+				vu, err = script.NewVU(nil, time.Second)
+				if err == nil {
+					err = vu.Iteration(context.Background())
+					vu.Close()
+				}
+			}
+			if err == nil {
+				t.Fatal("no error")
+			}
+			line, col, ok := ErrorLocation(err)
+			if !ok || line != tc.line || col != tc.column {
+				t.Fatalf("location %d:%d (ok %v), want %d:%d; error %v", line, col, ok, tc.line, tc.column, err)
+			}
+		})
+	}
+	if _, _, ok := ErrorLocation(errors.New("not from a script")); ok {
+		t.Fatal("a plain error has a location")
+	}
+}

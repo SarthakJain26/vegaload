@@ -61,6 +61,64 @@ type RunStarted struct {
 	Thresholds    []ThresholdSpec `json:"thresholds,omitempty"`
 	AbortOnBreach bool            `json:"abortOnBreach,omitempty"`
 	Version       string          `json:"version,omitempty"`
+	// Definition is the full resolved test definition. Readers that predate
+	// it ignore it; the fields above keep their meaning.
+	Definition *Definition `json:"definition,omitempty"`
+}
+
+// Definition is everything a run was set up with, after defaults were
+// applied. Of whatever a user could put a credential in (options, headers,
+// body, environment, data) it holds only names, keys, sizes and counts,
+// never a value.
+type Definition struct {
+	Executor      string          `json:"executor"`
+	VUs           int             `json:"vus,omitempty"`
+	MaxVUs        int             `json:"maxVUs,omitempty"`
+	Rate          float64         `json:"rate,omitempty"`
+	Duration      string          `json:"duration,omitempty"`
+	Stages        []Stage         `json:"stages,omitempty"`
+	Timeout       string          `json:"timeout,omitempty"`
+	Scenario      *ScenarioDef    `json:"scenario,omitempty"`
+	Request       *RequestDef     `json:"request,omitempty"`
+	Thresholds    []ThresholdSpec `json:"thresholds,omitempty"`
+	AbortOnBreach bool            `json:"abortOnBreach,omitempty"`
+	AbortGrace    string          `json:"abortGrace,omitempty"`
+	Baseline      *BaselineDef    `json:"baseline,omitempty"`
+	DataFiles     []DataFileDef   `json:"dataFiles,omitempty"`
+	// Env and SecretEnv are the names of the exposed environment variables.
+	Env       []string          `json:"env,omitempty"`
+	SecretEnv []string          `json:"secretEnv,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
+}
+
+// ScenarioDef is the scenario file of a run.
+type ScenarioDef struct {
+	File     string `json:"file"`     // base name only
+	Language string `json:"language"` // javascript, typescript or python
+}
+
+// RequestDef is the protocol-direct request of a run.
+type RequestDef struct {
+	Protocol    string   `json:"protocol"`
+	Target      string   `json:"target"` // passed through SanitizeTarget
+	Method      string   `json:"method,omitempty"`
+	OptionKeys  []string `json:"optionKeys,omitempty"`
+	HeaderNames []string `json:"headerNames,omitempty"`
+	BodyBytes   int      `json:"bodyBytes,omitempty"`
+	Insecure    bool     `json:"insecure,omitempty"`
+}
+
+// BaselineDef is the baseline gate of a run.
+type BaselineDef struct {
+	File                 string  `json:"file"` // base name only
+	MaxRegressionPercent float64 `json:"maxRegressionPercent"`
+}
+
+// DataFileDef is one data file of a run: its name and row count, never a cell.
+type DataFileDef struct {
+	Name string `json:"name"`
+	File string `json:"file"` // base name only
+	Rows int    `json:"rows"`
 }
 
 // Stage is one ramp or step stage.

@@ -55,6 +55,10 @@ func cmdMCPServe(args []string) int {
 		fmt.Fprintln(fs.Output(), "  POST /mcp      one JSON-RPC message in, the JSON-RPC answer out")
 		fmt.Fprintln(fs.Output(), "  GET  /sse      Server-Sent Events stream (MCP 2024-11-05), with POST /message")
 		fmt.Fprintln(fs.Output(), "A non-loopback address needs a token (-token-env), sent as a Bearer header.")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "An agent cannot approve a host that is not localhost. run_test and validate_scenario ask")
+		fmt.Fprintln(fs.Output(), "the user (MCP elicitation, over stdio or /sse) and add -allow-target only if they agree;")
+		fmt.Fprintln(fs.Output(), "a client that cannot ask, or POST /mcp, gets the command for the user to run instead.")
 		fs.PrintDefaults()
 	}
 	httpAddr := fs.String("http", "", "listen for MCP over HTTP/SSE on this address, for example 127.0.0.1:8765 (default: use stdio)")

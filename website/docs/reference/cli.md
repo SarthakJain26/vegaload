@@ -30,16 +30,30 @@ Every command takes `-output text` (the default) or `-output json`. `run` and `d
 | `live` | Print or open this machine's live view page. `live reset` starts a new project. |
 | `mcp serve` | Run the MCP server for an agent. |
 | `mcp eval` | Run the MCP tool-calling eval suite against this binary. |
-| `version` | Print the version. |
+| `version` | Print the version. `-output json` adds the stream schema and the feature list. |
 
 ## Exit codes
 
-| Code | `run` | Other commands |
+These codes are stable. A script or an agent can rely on them.
+
+| Code | Command | Meaning |
 | --- | --- | --- |
-| 0 | The run finished. Thresholds, if any, passed. | Success. |
-| 1 | | `validate`: the scenario is not valid. `compare`: a regression. `doctor`: a check failed. `init -status`: something is missing. |
-| 2 | VegaLoad refused to start, for example a host that is not allowed. | `validate`: bad usage. |
-| 3 | A threshold or the baseline gate was breached. | |
+| 0 | every command | Success. For `run`: the run finished, and its thresholds and baseline gate, if any, passed. For `validate`: the scenario is valid. For `compare`: no regression. |
+| 1 | `run` | The run could not finish, for example a scenario that cannot be loaded. |
+| 1 | `validate` | The scenario is not valid. A host the rules refused makes it not valid. |
+| 1 | `compare` | A regression, or a report that cannot be read. |
+| 1 | `doctor` | A check failed. With `-strict`, a warning too. |
+| 1 | `init -status` | Something is missing or out of date. |
+| 1 | `mcp eval` | A case failed. |
+| 1 | other commands | The command failed, for example a file that cannot be read or written. |
+| 1 | `vegaload` | No command, or a command that does not exist. |
+| 2 | every command | Bad usage: a flag or an argument that is not valid. |
+| 2 | `run` | VegaLoad refused to send load: a host that is not localhost and not allowed (a `-target`, or a host a scenario calls), a shape above a hard cap, or a stream destination that breaks a rule. |
+| 3 | `run` | A threshold or the baseline gate was breached, or `-abort-on-breach` stopped the run. |
+| 130 | `run` | A run with a stream or the live view was stopped with Ctrl-C (SIGINT). The stream ends with `run.failed`. |
+| 143 | `run` | The same, for SIGTERM. |
+
+A run with no stream and no live view sets no signal handler: Ctrl-C ends it, and the shell shows 130 or 143 as well.
 
 A run with no threshold exits 0 even if every call failed. See [Troubleshooting](../help/troubleshooting.md).
 
@@ -128,19 +142,29 @@ By default a run is shown live in the browser. See [`docs/streaming.md`](https:/
 
 To share one live view project with litmus-lite (a load run and a chaos run on one page), run `vegaload init -live-dir DIR` and give litmus-lite's MCP server the same folder. Terminal runs still use the default folder unless you export `VEGALOAD_CONFIG_DIR`.
 
-A flag wins over its variable. The live view sends the run's numbers, thresholds, step and protocol names, labels and the target (without credentials) to the service. It never sends headers, bodies, options, environment values, secrets or data. Turn it off with `-no-live` or `VEGALOAD_LIVE=off`.
+A flag wins over its variable. The live view sends the run's numbers, thresholds, step and protocol names, labels, the target (without credentials) and the run's settings to the service. It never sends the value of a header, an option or an environment variable, a body, a secret or a data cell. The settings list those only by name, key, size or row count. Turn it off with `-no-live` or `VEGALOAD_LIVE=off`.
 
 ### Safety
 
 | Flag | Meaning |
 | --- | --- |
 | `-allow-target` | A host (or `host:port`) that is allowed without a question, besides localhost. Repeat the flag. |
-| `-yes` | Skip the question for a host that is not localhost and not allowed. Needed for runs with no one at the keyboard and for agent runs. |
+| `-yes` | Skip the question for a host that is not localhost and not allowed. Needed for runs with no one at the keyboard. An agent's `run_test` cannot set it. |
 | `-cap-vus` | Hard cap on virtual users. Default `10000`. |
 | `-cap-duration` | Hard cap on run length. Default `24h`. |
 | `-cap-rate` | Hard cap on iterations per second. Default `100000`. |
 | `-audit-log` | Path of the audit log. Default `~/.vegaload/audit.log`. |
 | `-trigger` | What started the run, as recorded in the audit log. Default `cli`. |
+
+A scenario checks the host of every call. A scenario run stops at the first call to a host that is not allowed, and exits 2.
+
+When `run` refuses a host and `-output json` is set, stdout has one JSON object instead of a result. `refused_hosts` lists the hosts to approve:
+
+```json
+{"error":"refusing to run against \"https://staging.example.com/\" without confirmation (pass -yes, or add it with -allow-target)","refused_hosts":["staging.example.com"]}
+```
+
+With `-output jsonl` the same fields are in a `run_failed` line. The message on stderr does not change.
 
 See [Safety](../ai-agents/safety.md).
 
@@ -151,6 +175,39 @@ vegaload validate [flags] <scenario-file>
 ```
 
 Runs the scenario once, with one user and one iteration. It makes real network calls and follows the same host rules as `run`. Flags: `-allow-target`, `-yes`, `-audit-log`, `-data`, `-data-pick`, `-env`, `-secret-env`, `-timeout` (default `30s`), `-trigger`, `-output`.
+
+`-output json` prints one object:
+
+| Field | Meaning |
+| --- | --- |
+| `scenario` | The scenario file. |
+| `valid` | True when the script loaded, its iteration ran without an error, and no host was refused. |
+| `stage` | When not valid: `load` (the script could not be read or started) or `iteration`. |
+| `error` | When not valid: why. |
+| `error_location` | When the error came from a line of the scenario file: `file`, `line` and `column`. `column` is left out when it is not known. Left out when the error did not come from the file. |
+| `elapsed` | How long it took. |
+| `checks` | The `check()` results, if any. |
+| `config` | The settings the iteration ran with: `scenario`, `language` (`javascript`, `typescript` or `python`), `executor` (`validate`), `vus` (1), `iterations` (1), `timeout`, and when given, `data_files` (`name`, `file`, `rows`), `env` and `secret_env` (names only), `allow_targets` and `yes`. |
+| `hosts` | The hosts the iteration reached, in the order it first called them. |
+| `refused_hosts` | The hosts the rules refused. Approve one with `-allow-target`. |
+
+`hosts` and `refused_hosts` cover this one iteration. A scenario that picks hosts at random can call others in a real run.
+
+The text output shows the location as `at file:line:column`.
+
+## `version`
+
+```
+vegaload version [-output text|json]
+```
+
+`vegaload --version` is the same. `-output json` prints:
+
+```json
+{"version":"0.9.0","schemas":{"stream":"vegaload.io/stream/v1"},"features":["abort-on-breach","baseline","checks","..."],"go":"go1.24.0","os":"darwin","arch":"arm64"}
+```
+
+`features` is a sorted list of names for what this binary can do, such as `thresholds`, `validate-json`, `run-started-definition`, `mcp-elicitation`, and `protocols:NAME` for each protocol. A name never changes meaning. Test for one with a plain string match.
 
 ## `new`
 

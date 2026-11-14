@@ -26,10 +26,11 @@ tools are all you need here:
 
 - Use at most `vus: 5` and `duration: "10s"`, with the `fixed-vus` executor.
   If the user asks for more, do not use this skill. Use `vegaload`.
-- A target that is not localhost needs `allow_targets` or `yes: true`. There
-  is no terminal here to ask a person, so always confirm with the user before
-  you send even a small test to a server that is not localhost or that they
-  did not name.
+- A target that is not localhost needs the user's approval, and you cannot
+  give it: there is no `yes` or `allow_targets` argument. VegaLoad asks the
+  user in the editor. If the tool instead returns a command, show it to the
+  user and ask them to run it in their own terminal. Do not send even a small
+  test to a server that is not localhost or that the user did not name.
 - Put tokens and passwords in `secret_env`. VegaLoad removes them from every
   output.
 

@@ -28,7 +28,8 @@ vegaload run -vus 5 -duration 10s examples/scenarios/http-ws-chain.vl.js
 first non-flag argument; run `vegaload run -h` for the full flag list.) A
 host outside localhost needs `-allow-target` or `-yes` — the same FR-CLI-06
 allowlist protocol-direct mode's `-target` uses, just enforced per call
-since a script's own targets aren't known until it runs. A scenario with no
+since a script's own targets aren't known until it runs. The run stops at
+the first call to a host that is not allowed, and exits 2. A scenario with no
 network calls at all is still useful for pure per-iteration logic against
 VegaLoad's VU pool and executor shapes (fixed-VU, ramp, step,
 constant-arrival-rate) —

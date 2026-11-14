@@ -100,8 +100,6 @@ type runTestArgs struct {
 	Stages        string   `json:"stages,omitempty"`
 	Rate          float64  `json:"rate,omitempty"`
 	MaxVUs        int      `json:"max_vus,omitempty"`
-	AllowTargets  []string `json:"allow_targets,omitempty"`
-	Yes           bool     `json:"yes,omitempty"`
 	ReportPath    string   `json:"report_path,omitempty"`
 	NoReport      bool     `json:"no_report,omitempty"`
 	Options       []string `json:"options,omitempty"`
@@ -134,9 +132,12 @@ func runTestTool(exePath string) Tool {
 		Name: "run_test",
 		Description: "Run a load test: either a scenario file (scenario_path) or a protocol-direct target " +
 			"(target + protocol). Equivalent to `vegaload run`. Returns the run's report.Result and, unless " +
-			"no_report is set, the path to a self-contained HTML report. A non-localhost target that isn't in " +
-			"allow_targets is refused unless yes is set — the same FR-CLI-06 safety gate `vegaload run` enforces " +
-			"from a terminal, since this tool has no interactive terminal of its own to prompt on. Optional thresholds " +
+			"no_report is set, the path to a self-contained HTML report. A host that is not localhost needs a person's " +
+			"approval, and this tool cannot give it: there is no yes or allow_targets argument. When the run reaches such " +
+			"a host (the target, or any host a scenario calls), VegaLoad asks the user in the MCP client and, only if " +
+			"they approve, runs the same command again with -allow-target for that host. If the client cannot ask, the " +
+			"tool returns an error with the exact `vegaload run` command for the user to run in their own terminal. " +
+			"A scenario run stops at the first host that is not approved. Optional thresholds " +
 			"(each like \"p95 < 300ms\", \"p95{protocol=\\\"ftp\\\"} < 500ms\" or \"error_rate < 1%\") make the run pass or fail: the result then carries " +
 			"thresholds and thresholds_passed. A breached threshold is a normal result with thresholds_passed false, " +
 			"not a tool error — the same run exits 3 from a terminal. With baseline_path the run is also compared with an earlier " +
@@ -159,8 +160,6 @@ func runTestTool(exePath string) Tool {
 				"stages":          map[string]any{"type": "string", "description": "comma-separated target:duration stages for ramp/step, e.g. \"10:30s,0:10s\". For ramping-arrival-rate the target is iterations per second, e.g. \"50:5s,200:5s,600:3s,200:4s,50:3s\" (the rate moves in a straight line to each target; set max_vus)"},
 				"rate":            map[string]any{"type": "number", "description": "iterations per second (constant-arrival-rate); the starting rate of the stages for ramping-arrival-rate (default 0)"},
 				"max_vus":         map[string]any{"type": "integer", "description": "max concurrent VUs (constant-arrival-rate, ramping-arrival-rate)"},
-				"allow_targets":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "additional hosts allowed without confirmation"},
-				"yes":             map[string]any{"type": "boolean", "description": "skip the confirmation gate for a non-allowlisted target"},
 				"report_path":     map[string]any{"type": "string", "description": "where to write the self-contained HTML report (default: a generated name)"},
 				"no_report":       map[string]any{"type": "boolean", "description": "skip writing the HTML report"},
 				"thresholds":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "pass/fail thresholds, each \"[name:] metric operator value\", e.g. \"p95 < 300ms\" or \"error_rate < 1%\". Metrics: p50, p90, p95, p99, mean, min, max, error_rate, rps, failed, total, check_rate (share of check() calls that passed). To target one named step() of a scenario, add a selector, e.g. \"p95{step=\\\"login\\\"} < 300ms\". To target one protocol, or one operation, use \"p95{protocol=\\\"ftp\\\"} < 500ms\" or \"error_rate{protocol=\\\"ftp\\\",op=\\\"roundtrip\\\"} < 1%\". check_rate cannot target a step or a protocol"},
@@ -182,6 +181,9 @@ func runTestTool(exePath string) Tool {
 			},
 		},
 		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			if err := refuseApprovalArgs(raw); err != nil {
+				return nil, err
+			}
 			var in runTestArgs
 			if err := json.Unmarshal(raw, &in); err != nil {
 				return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -228,9 +230,6 @@ func runTestTool(exePath string) Tool {
 			for _, o := range in.Options {
 				args = append(args, "-opt", o)
 			}
-			for _, t := range in.AllowTargets {
-				args = append(args, "-allow-target", t)
-			}
 			for _, t := range in.Thresholds {
 				args = append(args, "-threshold", t)
 			}
@@ -239,9 +238,6 @@ func runTestTool(exePath string) Tool {
 			}
 			if in.AbortGrace != "" {
 				args = append(args, "-abort-grace", in.AbortGrace)
-			}
-			if in.Yes {
-				args = append(args, "-yes")
 			}
 			if in.BaselinePath != "" {
 				args = append(args, "-baseline", in.BaselinePath)
@@ -259,14 +255,15 @@ func runTestTool(exePath string) Tool {
 			} else if reportPath != "" {
 				args = append(args, "-report", reportPath)
 			}
+			var positional []string
 			if in.ScenarioPath != "" {
-				args = append(args, in.ScenarioPath) // positional: must come last, flag.Parse stops at the first non-flag argument
+				positional = []string{in.ScenarioPath} // must come last, flag.Parse stops at the first non-flag argument
 			}
 
 			// stdout and stderr stay apart: stdout is the result JSON this tool
 			// parses, stderr holds notes (the live view's address among them)
 			// that go back as a second item and can never break the parsing.
-			stdout, stderr, err := RunCLISplit(ctx, exePath, args...)
+			stdout, stderr, err := runApproved(ctx, exePath, args, positional)
 			// Exit 3 means the run finished but broke a threshold. That
 			// is a result the caller asked for, not a tool failure, so
 			// the structured result is returned with thresholds_passed
@@ -609,8 +606,6 @@ func listProtocolsTool(exePath string) Tool {
 
 type validateScenarioArgs struct {
 	ScenarioPath string   `json:"scenario_path"`
-	AllowTargets []string `json:"allow_targets,omitempty"`
-	Yes          bool     `json:"yes,omitempty"`
 	Timeout      string   `json:"timeout,omitempty"`
 	DataFiles    []string `json:"data_files,omitempty"`
 	Env          []string `json:"env,omitempty"`
@@ -622,17 +617,17 @@ func validateScenarioTool(exePath string) Tool {
 		Name: "validate_scenario",
 		Description: "Check a scenario before a real load test: run it once, with one user and one iteration, and " +
 			"report whether it works. Equivalent to `vegaload validate`. This makes real network calls, under the same " +
-			"host rules as run_test (a non-localhost host that isn't in allow_targets is refused unless yes is set). " +
-			"Returns valid, and when it is not valid, stage (\"load\" if the script could not be read or started, " +
-			"\"iteration\" if the iteration returned an error) and error. A scenario that is not valid is a normal " +
+			"host rules as run_test: a host that is not localhost needs the user's approval, which VegaLoad asks for in " +
+			"the MCP client (or, if it cannot ask, the tool returns the command for the user to run in a terminal). " +
+			"Returns valid, the resolved config, the hosts the iteration reached (hosts) and, when it is not valid, " +
+			"stage (\"load\" if the script could not be read or started, \"iteration\" if the iteration returned an " +
+			"error), error and, when known, error_location (file, line, column). A scenario that is not valid is a normal " +
 			"result, not a tool error, so read valid before running run_test. Any check() results are listed too; " +
 			"a failed check does not make the scenario invalid.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"scenario_path": map[string]any{"type": "string", "description": "path to the scenario file (.vl.js or .py)"},
-				"allow_targets": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "additional hosts allowed without confirmation"},
-				"yes":           map[string]any{"type": "boolean", "description": "skip the confirmation gate for a non-allowlisted host"},
 				"timeout":       map[string]any{"type": "string", "description": "time limit for the one iteration, e.g. \"30s\" (default 30s)"},
 				"data_files":    dataFilesSchema,
 				"env":           envSchema,
@@ -641,6 +636,9 @@ func validateScenarioTool(exePath string) Tool {
 			"required": []string{"scenario_path"},
 		},
 		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			if err := refuseApprovalArgs(raw); err != nil {
+				return nil, err
+			}
 			var in validateScenarioArgs
 			if err := json.Unmarshal(raw, &in); err != nil {
 				return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -652,16 +650,9 @@ func validateScenarioTool(exePath string) Tool {
 			if in.Timeout != "" {
 				args = append(args, "-timeout", in.Timeout)
 			}
-			for _, t := range in.AllowTargets {
-				args = append(args, "-allow-target", t)
-			}
-			if in.Yes {
-				args = append(args, "-yes")
-			}
 			args = appendInputFlags(args, in.DataFiles, in.Env, in.SecretEnv)
-			args = append(args, in.ScenarioPath) // positional: must come last
 
-			stdout, err := RunCLI(ctx, exePath, args...)
+			stdout, _, err := runApproved(ctx, exePath, args, []string{in.ScenarioPath})
 			// Exit 1 with a JSON body means the scenario is not valid.
 			// That is the answer the caller asked for, not a failure of
 			// the tool, so the result is returned as-is. No JSON body

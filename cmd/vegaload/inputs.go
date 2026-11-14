@@ -6,6 +6,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/vegaload/vegaload/internal/inputs"
 )
@@ -28,6 +30,66 @@ func (f *scriptInputFlags) register(fs *flag.FlagSet) {
 
 func (f *scriptInputFlags) used() bool {
 	return len(f.data) > 0 || len(f.env) > 0 || len(f.secretEnv) > 0
+}
+
+// inputNames is all a run may say about its -data, -env and -secret-env: the
+// data files' names and row counts and the variable names, never a value.
+type inputNames struct {
+	Data      []inputFile `json:"data,omitempty"`
+	Env       []string    `json:"env,omitempty"`
+	SecretEnv []string    `json:"secret_env,omitempty"`
+}
+
+// inputFile is one data file: the NAME a scenario reads as data.NAME, the
+// file's base name, and its row count.
+type inputFile struct {
+	Name string `json:"name"`
+	File string `json:"file"`
+	Rows int    `json:"rows"`
+}
+
+func dataFileNames(sets map[string]*inputs.Set) []inputFile {
+	var out []inputFile
+	for _, name := range sortedNames(sets) {
+		s := sets[name]
+		out = append(out, inputFile{Name: name, File: s.FileName(), Rows: s.Len()})
+	}
+	return out
+}
+
+// envNames splits the -env and -secret-env lists into sorted names. A name in
+// both is a secret, as inputs.ResolveEnv treats it.
+func envNames(plain, secret []string) (env, secretEnv []string) {
+	split := func(list []string) map[string]bool {
+		out := map[string]bool{}
+		for _, item := range list {
+			for _, name := range strings.Split(item, ",") {
+				if name = strings.TrimSpace(name); name != "" {
+					out[name] = true
+				}
+			}
+		}
+		return out
+	}
+	p, s := split(plain), split(secret)
+	for name := range p {
+		if s[name] {
+			delete(p, name)
+		}
+	}
+	return sortedNames(p), sortedNames(s)
+}
+
+func sortedNames[V any](m map[string]V) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // resolve reads the data files and looks up the variables, and stores the
@@ -55,6 +117,8 @@ func (f *scriptInputFlags) resolve(cfg *runConfig) error {
 		if in := inputs.New(env, sets); in != nil {
 			cfg.Inputs = in // not assigned when nil: a nil *Inputs inside the interface would not compare equal to nil
 		}
+		cfg.inputNames.Data = dataFileNames(sets)
+		cfg.inputNames.Env, cfg.inputNames.SecretEnv = envNames([]string(f.env), []string(f.secretEnv))
 		return nil
 	}
 	if len(f.env) > 0 || len(f.secretEnv) > 0 {
@@ -71,6 +135,7 @@ func (f *scriptInputFlags) resolve(cfg *runConfig) error {
 		return err
 	}
 	cfg.DataSets = sets
+	cfg.inputNames.Data = dataFileNames(sets)
 	cfg.DataPick = f.pick
 	if cfg.DataPick == "" {
 		cfg.DataPick = "next"

@@ -189,6 +189,14 @@ type runConfig struct {
 	DataPick string
 	DataPlan *dataPlan
 
+	// inputNames is the names (never the values) of the data files and
+	// variables above, for run.started and validate's config.
+	inputNames inputNames
+
+	// hosts records the hosts a scenario's calls ask for. A scenario run and
+	// validate set it; it is nil otherwise.
+	hosts *hostLog
+
 	// Stream holds the -stream-*, -run-id, -label and live view flags
 	// (docs/streaming.md). stream is what they produced for this run; it is
 	// nil when the run is not streamed, and then nothing streams.
@@ -231,7 +239,7 @@ func parseRunArgs(args []string) (*runConfig, error) {
 
 	// FR-CLI-06: target allowlist and hard caps, on by default.
 	fs.Var(&allowTargets, "allow-target", "additional host (or host:port) allowed without confirmation, besides localhost (repeatable)")
-	fs.BoolVar(&cfg.Yes, "yes", false, "skip the confirmation prompt for a non-localhost, non-allowlisted target (required for non-interactive/MCP-driven runs)")
+	fs.BoolVar(&cfg.Yes, "yes", false, "skip the confirmation prompt for a non-localhost, non-allowlisted target (for runs with no one at the keyboard; an agent's MCP tools cannot set it)")
 	cfg.Limits = safety.DefaultLimits
 	fs.IntVar(&cfg.Limits.MaxVUs, "cap-vus", safety.DefaultLimits.MaxVUs, "hard cap on virtual users for this run")
 	fs.DurationVar(&cfg.Limits.MaxDuration, "cap-duration", safety.DefaultLimits.MaxDuration, "hard cap on run duration")
@@ -527,7 +535,8 @@ func buildIteration(cfg *runConfig) (engine.IterationFunc, func() error, error) 
 // to pause the whole run for a human the way there is for one
 // protocol-direct target chosen before the run starts. The approved
 // design is a hard fail instead — a disallowed host always refuses the
-// call unless -yes was passed for the whole run — so a scenario author
+// call unless -yes was passed for the whole run, and a run stops at the
+// first refused call (see runScenarioWithCollector) — so a scenario author
 // who wants to hit something outside localhost/-allow-target either
 // allowlists it up front or opts in to the whole run with -yes, the
 // same two ways out enforceSafety already offers, minus the prompt.
@@ -691,6 +700,9 @@ func driverRefused(res protocol.Result) bool {
 func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, func() error, error) {
 	path := cfg.ScenarioPath
 	check := buildSafetyCheck(cfg)
+	if cfg.hosts != nil {
+		check = cfg.hosts.wrap(check)
+	}
 
 	if strings.ToLower(filepath.Ext(path)) == ".py" {
 		script, err := python.Load(path)
@@ -762,6 +774,7 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	// not each iteration, is one request of the run.
 	if cfg.ScenarioPath != "" {
 		collector.RequestsFromCalls()
+		cfg.hosts = newHostLog()
 	}
 
 	// A streamed run says it has started before the scenario is loaded, so a
@@ -775,12 +788,22 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 
 	iter, closeFn, err := buildIteration(cfg)
 	if err != nil {
+		if cfg.hosts != nil {
+			if _, refused := cfg.hosts.Hosts(); len(refused) > 0 {
+				return nil, scenarioRefusal(refused)
+			}
+		}
 		return nil, err
 	}
 	defer closeFn() //nolint:errcheck // best-effort cleanup; a close failure shouldn't mask the run's own result
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// A refused host needs a person's approval, so the run stops at the first
+	// one instead of failing every iteration until its end.
+	if cfg.hosts != nil {
+		cfg.hosts.setOnRefuse(cancel)
+	}
 
 	start := time.Now()
 	// FR-CLI-13: a watcher looks at the run as it goes, and cancels ctx
@@ -804,6 +827,11 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	}
 	runErr := ex.Run(ctx, iter, collector)
 	stopWatcher()
+	if cfg.hosts != nil {
+		if _, refused := cfg.hosts.Hosts(); len(refused) > 0 {
+			return nil, scenarioRefusal(refused)
+		}
+	}
 	if runErr != nil {
 		return nil, runErr
 	}
@@ -907,7 +935,10 @@ func enforceSafety(cfg *runConfig, in io.Reader, out io.Writer, confirm func(io.
 	if confirm(in, out, prompt) {
 		return nil
 	}
-	return fmt.Errorf("refusing to run against %q without confirmation (pass -yes, or add it with -allow-target)", cfg.Target.URL)
+	return &refusalError{
+		msg:   fmt.Sprintf("refusing to run against %q without confirmation (pass -yes, or add it with -allow-target)", cfg.Target.URL),
+		hosts: []string{strings.ToLower(host)},
+	}
 }
 
 // promptConfirm writes prompt to out and reads one line from in,
@@ -929,8 +960,14 @@ func cmdRun(args []string) int {
 		return 2
 	}
 
-	if err := enforceSafety(cfg, os.Stdin, os.Stdout, promptConfirm); err != nil {
+	// The question goes to stderr when stdout carries JSON.
+	promptOut := io.Writer(os.Stdout)
+	if cfg.OutputMode != "text" {
+		promptOut = os.Stderr
+	}
+	if err := enforceSafety(cfg, os.Stdin, promptOut, promptConfirm); err != nil {
 		fmt.Fprintf(os.Stderr, "vegaload run: %v\n", err)
+		writeRefusal(os.Stdout, cfg.OutputMode, err)
 		return 2
 	}
 
@@ -977,6 +1014,12 @@ func executeRun(cfg *runConfig, out *runOutcome) int {
 	if err != nil {
 		out.fail(err)
 		fmt.Fprintf(os.Stderr, "vegaload run: %s\n", secrets.Redact(err.Error()))
+		if refusedHosts(err) != nil {
+			if cfg.OutputMode == "json" {
+				writeRefusal(os.Stdout, cfg.OutputMode, err) // jsonl already said so in its run_failed line
+			}
+			return 2
+		}
 		return 1
 	}
 	out.result = result
@@ -1095,7 +1138,11 @@ func runJSONL(cfg *runConfig, w io.Writer) (*report.Result, error) {
 	result, err := runScenarioWithCollector(cfg, collector)
 	close(done)
 	if err != nil {
-		emit("run_failed", map[string]any{"error": err.Error()})
+		data := map[string]any{"error": err.Error()}
+		if hosts := refusedHosts(err); hosts != nil {
+			data["refused_hosts"] = hosts
+		}
+		emit("run_failed", data)
 		return nil, err
 	}
 	emit("run_finished", result)

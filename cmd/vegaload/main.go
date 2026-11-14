@@ -51,9 +51,8 @@ func run(args []string) int {
 		return cmdImport(args[1:])
 	case "live":
 		return cmdLive(args[1:])
-	case "version":
-		fmt.Printf("vegaload %s\n", version)
-		return 0
+	case "version", "--version":
+		return cmdVersion(args[1:])
 	case "help", "-h", "--help":
 		printUsage()
 		return 0
@@ -83,10 +82,12 @@ Commands:
   live       Print or open this machine's live view page; "live reset" makes a new project
   doctor     Check that VegaLoad is set up and working (CLI, agent hosts, target)
   protocols  List the supported protocols, with options and examples
-  version    Print the vegaload version
+  version    Print the vegaload version ("version -output json" adds the stream schema and the feature list)
   help       Show this help text
 
 Every command supports -output text (default) or json; run and doctor also support jsonl.
+Exit codes: 0 success, 1 failure, 2 bad usage or a refused host, 3 a breached threshold or
+baseline (run), 130/143 a streamed run stopped by Ctrl-C/SIGTERM. A missing or unknown command exits 1.
 "run -threshold" makes a run pass or fail on its own numbers; a breached threshold exits 3.
 A "run" also writes a self-contained HTML report by default — see
 "vegaload run -h" for -report/-no-report/-no-open.

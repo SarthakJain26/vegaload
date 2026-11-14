@@ -31,19 +31,27 @@ With no terminal, such as in CI, VegaLoad does not ask. It refuses:
 vegaload run: refusing to run against "https://staging.example.com/health" without confirmation (pass -yes, or add it with -allow-target)
 ```
 
-**From an agent**, the MCP server has no terminal to ask on. `run_test` and `validate_scenario` refuse a host that is not localhost, unless the call lists it in `allow_targets` or sets `yes: true`. The refusal is a tool error, and the agent sees the same message as above.
+**From an agent**, only you can approve a host. `run_test` and `validate_scenario` have no `yes` or `allow_targets` argument, and refuse a call that has one. When the run reaches a host that is not localhost, one of two things happens:
 
-The check applies to every call, not only to `target`. A scenario that calls a second host with `http`, `grpc`, `redis` or any other global is checked per call. Some protocols check only the first host you name. For example, a Kafka run checks the first broker, not the others the cluster announces. Each protocol's notes say so.
+- If your agent host can ask you a question (MCP elicitation), it asks: "Your agent asked VegaLoad to send load to host staging.example.com ... Allow it for this one run?" The question shows the command. Only if you say yes does VegaLoad run the same command again, with `-allow-target staging.example.com` added and nothing else. If you say no, nothing is sent to that host.
+- If your agent host cannot ask, the tool returns an error with the exact command. The agent shows it to you, and you run it in your own terminal:
+
+```
+vegaload run -vus 5 -duration 30s -allow-target staging.example.com checkout.vl.js
+```
+
+Your approval lasts for that one run. The next run asks again. The MCP server over `GET /sse` can ask you. Over `POST /mcp` it cannot, so it returns the command.
+
+The check applies to every call, not only to `target`. A scenario that calls a second host with `http`, `grpc`, `redis` or any other global is checked per call, and a run stops at the first call to a host that is not allowed. Some protocols check only the first host you name. For example, a Kafka run checks the first broker, not the others the cluster announces. Each protocol's notes say so.
 
 ## What the agent is told
 
-The guide files from `vegaload init` tell the agent to confirm with you before it uses `yes: true` or adds a host. They also tell it to start short: 10 seconds and a few users.
+The guide files from `vegaload init` tell the agent that you approve each new host, and to start short: 10 seconds and a few users.
 
-This part is guidance, not enforcement. An agent can set `yes: true`. Your own controls decide what happens next:
+You can still add your own controls:
 
 - Keep Cursor's and Claude Code's approval step on for `run_test`. You then see each call, with its target, before it runs.
-- Review the `allow_targets` the agent puts in a call.
-- Use `-allow-target` yourself for the few hosts you trust, and nothing more.
+- Use `-allow-target` yourself, in a terminal, for the few hosts you trust.
 
 ## The audit log
 

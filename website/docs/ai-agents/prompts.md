@@ -56,7 +56,7 @@ The agent calls `diagnose_failure`. It reads rule-based findings: failure rate, 
 
 > Run a 10-second test against https://staging.example.com/health. Ask me before you send anything.
 
-The agent should stop and ask you. Approve with a host in `allow_targets`, not a blanket `yes`.
+The agent cannot approve the host itself. VegaLoad asks you in your editor whether to allow `staging.example.com` for this run. If your editor cannot ask, the agent shows you a `vegaload run ... -allow-target staging.example.com` command to run in your terminal.
 
 ## Put it in CI
 

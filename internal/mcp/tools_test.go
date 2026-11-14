@@ -111,7 +111,7 @@ func TestRunTestTool_BuildsArgsAndParsesResult(t *testing.T) {
 	tools := NewTools(bin)
 
 	out, err := callTool(t, tools, "run_test", map[string]any{
-		"target": "https://example.com", "protocol": "http1", "vus": 5, "duration": "10s", "yes": true,
+		"target": "https://example.com", "protocol": "http1", "vus": 5, "duration": "10s",
 	})
 	if err != nil {
 		t.Fatalf("run_test returned error: %v", err)
@@ -126,7 +126,7 @@ func TestRunTestTool_BuildsArgsAndParsesResult(t *testing.T) {
 	}
 
 	args := readArgs(t, argsFile)
-	for _, want := range []string{"-target", "https://example.com", "-protocol", "http1", "-vus", "5", "-duration", "10s", "-yes", "-trigger", "mcp"} {
+	for _, want := range []string{"-target", "https://example.com", "-protocol", "http1", "-vus", "5", "-duration", "10s", "-trigger", "mcp"} {
 		if !containsArg(args, want) {
 			t.Errorf("args %v missing %q", args, want)
 		}
@@ -139,7 +139,7 @@ func TestRunTestTool_PassesOptions(t *testing.T) {
 	tools := NewTools(bin)
 
 	_, err := callTool(t, tools, "run_test", map[string]any{
-		"target": "https://example.com", "protocol": "http1", "yes": true, "no_report": true,
+		"target": "https://example.com", "protocol": "http1", "no_report": true,
 		"options": []string{"read=64", "expect=ok"},
 	})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestRunTestTool_NoReportSkipsReportFlag(t *testing.T) {
 	tools := NewTools(bin)
 
 	out, err := callTool(t, tools, "run_test", map[string]any{
-		"target": "https://example.com", "protocol": "http1", "yes": true, "no_report": true,
+		"target": "https://example.com", "protocol": "http1", "no_report": true,
 	})
 	if err != nil {
 		t.Fatalf("run_test returned error: %v", err)
@@ -353,7 +353,7 @@ func TestGenerateFromSpecTool_RequiresSpecPath(t *testing.T) {
 func TestRunTestTool_PropagatesCLIFailure(t *testing.T) {
 	bin, _ := argRecordingBinary(t, "", 1)
 	tools := NewTools(bin)
-	if _, err := callTool(t, tools, "run_test", map[string]any{"target": "https://example.com", "protocol": "http1", "yes": true}); err == nil {
+	if _, err := callTool(t, tools, "run_test", map[string]any{"target": "https://example.com", "protocol": "http1"}); err == nil {
 		t.Error("expected an error when the underlying CLI command exits non-zero")
 	}
 }
@@ -402,7 +402,7 @@ func TestRunTestTool_PassesThresholdsAsFlags(t *testing.T) {
 	tools := NewTools(bin)
 
 	out, err := callTool(t, tools, "run_test", map[string]any{
-		"target": "https://example.com", "protocol": "http1", "yes": true, "no_report": true,
+		"target": "https://example.com", "protocol": "http1", "no_report": true,
 		"thresholds": []string{"p95 < 300ms", "fast: error_rate < 1%"},
 	})
 	if err != nil {
@@ -434,7 +434,7 @@ func TestRunTestTool_BreachedThresholdIsAResultNotAnError(t *testing.T) {
 	tools := NewTools(bin)
 
 	out, err := callTool(t, tools, "run_test", map[string]any{
-		"target": "https://example.com", "protocol": "http1", "yes": true, "no_report": true,
+		"target": "https://example.com", "protocol": "http1", "no_report": true,
 		"thresholds": []string{"p95 < 1ns"},
 	})
 	if err != nil {
@@ -453,7 +453,7 @@ func TestRunTestTool_OtherExitCodesStillError(t *testing.T) {
 		bin, _ := argRecordingBinary(t, "", code)
 		tools := NewTools(bin)
 		_, err := callTool(t, tools, "run_test", map[string]any{
-			"target": "https://example.com", "protocol": "http1", "yes": true, "no_report": true,
+			"target": "https://example.com", "protocol": "http1", "no_report": true,
 			"thresholds": []string{"nonsense"},
 		})
 		if err == nil {
@@ -466,7 +466,7 @@ func TestValidateScenarioTool_BuildsArgsAndReturnsResult(t *testing.T) {
 	bin, argsFile := argRecordingBinary(t, `{"scenario":"s.vl.js","valid":true,"elapsed":"10ms"}`, 0)
 	tools := NewTools(bin)
 	out, err := callTool(t, tools, "validate_scenario", map[string]any{
-		"scenario_path": "s.vl.js", "allow_targets": []string{"api.test"}, "yes": true, "timeout": "5s",
+		"scenario_path": "s.vl.js", "timeout": "5s",
 	})
 	if err != nil {
 		t.Fatalf("validate_scenario returned error: %v", err)
@@ -475,7 +475,7 @@ func TestValidateScenarioTool_BuildsArgsAndReturnsResult(t *testing.T) {
 		t.Fatalf("result = %v", m)
 	}
 	args := readArgs(t, argsFile)
-	want := []string{"validate", "-output", "json", "-trigger", "mcp", "-timeout", "5s", "-allow-target", "api.test", "-yes", "s.vl.js"}
+	want := []string{"validate", "-output", "json", "-trigger", "mcp", "-timeout", "5s", "s.vl.js"}
 	if strings.Join(args, " ") != strings.Join(want, " ") {
 		t.Errorf("args = %v, want %v", args, want)
 	}
@@ -511,7 +511,7 @@ func TestRunTestTool_PassesBaselineFlags(t *testing.T) {
 	resultJSON, _ := json.Marshal(report.Result{Executor: "fixed-vus"})
 	bin, argsFile := argRecordingBinary(t, string(resultJSON), 0)
 	_, err := callTool(t, NewTools(bin), "run_test", map[string]any{
-		"target": "https://example.com", "protocol": "http1", "yes": true, "no_report": true,
+		"target": "https://example.com", "protocol": "http1", "no_report": true,
 		"baseline_path": "base.json", "max_regression": 0,
 	})
 	if err != nil {
@@ -527,7 +527,7 @@ func TestRunTestTool_PassesAbortFlags(t *testing.T) {
 	resultJSON, _ := json.Marshal(report.Result{Executor: "fixed-vus"})
 	bin, argsFile := argRecordingBinary(t, string(resultJSON), 0)
 	if _, err := callTool(t, NewTools(bin), "run_test", map[string]any{
-		"target": "https://example.com", "protocol": "http1", "yes": true, "no_report": true,
+		"target": "https://example.com", "protocol": "http1", "no_report": true,
 		"thresholds": []any{"failed < 5"}, "abort_on_breach": true, "abort_grace": "3s",
 	}); err != nil {
 		t.Fatal(err)
@@ -541,7 +541,7 @@ func TestRunTestTool_PassesJUnitFlag(t *testing.T) {
 	resultJSON, _ := json.Marshal(report.Result{Executor: "fixed-vus"})
 	bin, argsFile := argRecordingBinary(t, string(resultJSON), 0)
 	if _, err := callTool(t, NewTools(bin), "run_test", map[string]any{
-		"target": "https://example.com", "protocol": "http1", "yes": true, "no_report": true, "junit_path": "out/junit.xml",
+		"target": "https://example.com", "protocol": "http1", "no_report": true, "junit_path": "out/junit.xml",
 	}); err != nil {
 		t.Fatal(err)
 	}

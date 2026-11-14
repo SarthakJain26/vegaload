@@ -26,10 +26,14 @@ const maxHTTPBody = 4 << 20
 //   - POST /mcp takes one JSON-RPC message and answers with the JSON-RPC
 //     response in the body (202 with no body for a notification). This is
 //     the simple path for scripts and for clients that do not need a stream.
+//     It has no way to send the client a request, so a tool cannot ask the
+//     person a question (Confirm returns ErrNoElicitation).
 //   - GET /sse opens a Server-Sent Events stream, the transport of MCP
 //     protocol version 2024-11-05. The first event, "endpoint", names the
-//     URL to POST messages to (/message?sessionId=...). Each response is
-//     sent back on the stream as a "message" event.
+//     URL to POST messages to (/message?sessionId=...). Each response, and
+//     each request this server sends the client (elicitation/create), is
+//     sent on the stream as a "message" event; the client POSTs its answer
+//     to the same /message URL.
 //
 // When token is not empty, every request must carry
 // "Authorization: Bearer <token>". Requests with an Origin header that is
@@ -58,8 +62,9 @@ type httpServer struct {
 }
 
 type sseSession struct {
-	out  chan []byte
-	done chan struct{}
+	out    chan []byte
+	done   chan struct{}
+	client *session // what the client declared, and requests sent to it on the stream
 }
 
 // guard applies the Origin and token checks to every route except
@@ -148,6 +153,14 @@ func (h *httpServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 	id := newSessionID()
 	sess := &sseSession{out: make(chan []byte, 16), done: make(chan struct{})}
+	sess.client = newSession(func(data []byte) error {
+		select {
+		case sess.out <- data:
+			return nil
+		case <-sess.done:
+			return fmt.Errorf("the event stream is closed")
+		}
+	})
 	h.mu.Lock()
 	h.sessions[id] = sess
 	h.mu.Unlock()
@@ -156,6 +169,7 @@ func (h *httpServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		delete(h.sessions, id)
 		h.mu.Unlock()
 		close(sess.done)
+		sess.client.close()
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -194,11 +208,15 @@ func (h *httpServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+	// The client's answer to a request this server sent on the stream.
+	if sess.client.deliverIfReply(trimSpace(body)) {
+		return
+	}
 	// The tool may run for a long time, so the answer goes out on the
 	// stream and not in this response. The request context ends when
 	// this handler returns, so the work uses its own context that ends
 	// when the stream closes.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(withSession(context.Background(), sess.client))
 	go func() {
 		defer cancel()
 		go func() {

@@ -17,13 +17,37 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 )
 
-// protocolVersion is the MCP protocol version this server speaks.
-// FR-MCP-02 only requires a working stdio transport, not negotiation
-// across multiple protocol versions, so this is fixed rather than
-// configurable.
+// protocolVersion is the MCP protocol version this server answers a client
+// that names no version.
 const protocolVersion = "2024-11-05"
+
+// supportedVersions are the MCP versions this server speaks, newest first.
+// A client that asks for one of them gets it back; one that asks for another
+// gets the newest. They differ, for this server, only in what the client may
+// declare: elicitation came in 2025-06-18.
+var supportedVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+
+// negotiateVersion picks the version to answer initialize with.
+func negotiateVersion(params json.RawMessage) string {
+	var p struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &p)
+	}
+	if p.ProtocolVersion == "" {
+		return protocolVersion
+	}
+	for _, v := range supportedVersions {
+		if v == p.ProtocolVersion {
+			return v
+		}
+	}
+	return supportedVersions[0]
+}
 
 // Tool is one MCP tool: a name and JSON-schema-shaped description an
 // MCP client (Cursor, Claude Code, any other MCP host) shows an LLM, and
@@ -112,26 +136,102 @@ const (
 // newline as the message delimiter rather than Content-Length framing.
 // It runs until r is exhausted (EOF, the normal way an MCP client ends
 // the session by closing the subprocess's stdin) or ctx is done.
+//
+// Requests are handled one at a time, in order. Reading goes on while a
+// request is handled, so that the client's answer to a request this server
+// sent it (elicitation/create, see Confirm) reaches the tool that waits for
+// it.
 func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // a report.Result embedded in a tool response can be large
-	for scanner.Scan() {
-		if ctx.Err() != nil {
+	var wmu sync.Mutex
+	sess := newSession(func(data []byte) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		if _, err := w.Write(append(data, '\n')); err != nil {
+			return fmt.Errorf("mcp: writing message: %w", err)
+		}
+		return nil
+	})
+	defer sess.close()
+
+	read := make(chan []byte)
+	readErr := make(chan error, 1)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		defer close(read)
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024) // a report.Result embedded in a tool response can be large
+		for scanner.Scan() {
+			line := trimSpace(scanner.Bytes())
+			if len(line) == 0 || sess.deliverIfReply(line) {
+				continue
+			}
+			select {
+			case read <- append([]byte(nil), line...):
+			case <-done:
+				return
+			}
+		}
+		readErr <- scanner.Err()
+		sess.close() // no answer can arrive any more
+	}()
+	// The queue never makes the reader wait, so an answer that comes after
+	// another request is still read while a tool waits for it.
+	lines := queueLines(read, done)
+
+	ctx = withSession(ctx, sess)
+	for {
+		select {
+		case <-ctx.Done():
 			return ctx.Err()
-		}
-		line := scanner.Bytes()
-		if len(trimSpace(line)) == 0 {
-			continue
-		}
-		resp := s.handleLine(ctx, line)
-		if resp == nil {
-			continue // a notification: no response is sent, per JSON-RPC 2.0
-		}
-		if err := writeResponse(w, resp); err != nil {
-			return err
+		case line, ok := <-lines:
+			if !ok {
+				return <-readErr
+			}
+			resp := s.handleLine(ctx, line)
+			if resp == nil {
+				continue // a notification: no response is sent, per JSON-RPC 2.0
+			}
+			data, err := json.Marshal(resp)
+			if err != nil {
+				return fmt.Errorf("mcp: encoding response: %w", err)
+			}
+			if err := sess.send(data); err != nil {
+				return err
+			}
 		}
 	}
-	return scanner.Err()
+}
+
+// queueLines passes on what arrives on in, in order, holding as many lines as
+// it must so that a send on in never waits for the reader of the result. The
+// result is closed after in is closed and everything was passed on.
+func queueLines(in <-chan []byte, done <-chan struct{}) <-chan []byte {
+	out := make(chan []byte)
+	go func() {
+		defer close(out)
+		var q [][]byte
+		for in != nil || len(q) > 0 {
+			var send chan<- []byte
+			var next []byte
+			if len(q) > 0 {
+				send, next = out, q[0]
+			}
+			select {
+			case line, ok := <-in:
+				if !ok {
+					in = nil
+					continue
+				}
+				q = append(q, line)
+			case send <- next:
+				q = q[1:]
+			case <-done:
+				return
+			}
+		}
+	}()
+	return out
 }
 
 func trimSpace(b []byte) []byte {
@@ -147,17 +247,6 @@ func trimSpace(b []byte) []byte {
 
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
-}
-
-func writeResponse(w io.Writer, resp *rpcResponse) error {
-	data, err := json.Marshal(resp)
-	if err != nil {
-		return fmt.Errorf("mcp: encoding response: %w", err)
-	}
-	if _, err := w.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("mcp: writing response: %w", err)
-	}
-	return nil
 }
 
 // handleLine parses and dispatches one line. It returns nil for a
@@ -188,8 +277,11 @@ func (s *Server) handleLine(ctx context.Context, line []byte) *rpcResponse {
 func (s *Server) dispatch(ctx context.Context, req rpcRequest) (any, *rpcError) {
 	switch req.Method {
 	case "initialize":
+		if sess := sessionFrom(ctx); sess != nil {
+			sess.initialized(req.Params)
+		}
 		return map[string]any{
-			"protocolVersion": protocolVersion,
+			"protocolVersion": negotiateVersion(req.Params),
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "vegaload", "version": "mcp-0"},
 		}, nil

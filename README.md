@@ -850,7 +850,8 @@ thing):
 first non-flag argument; run `vegaload run -h` for the full flag list.) A
 host outside localhost needs `-allow-target` or `-yes` — the same FR-CLI-06
 allowlist protocol-direct mode's `-target` uses, just enforced per call
-since a script's own targets aren't known until it runs. A scenario with no
+since a script's own targets aren't known until it runs. The run stops at
+the first call to a host that is not allowed, and exits 2. A scenario with no
 network calls at all is still useful for pure per-iteration logic against
 VegaLoad's VU pool and executor shapes (fixed-VU, ramp, step,
 constant-arrival-rate) —
@@ -1163,9 +1164,26 @@ whether it works. It catches a script that will not load (a syntax error, a
 missing file, no `iteration()` in Python) and an iteration that fails (a
 wrong URL, a thrown error, a host that is not allowed). It makes real
 network calls, under the same host rules as `run`, so a host that is not
-localhost needs `-allow-target` or `-yes`. Any `check()` results are listed,
-and a failed check does not make the scenario invalid. Add `-output json`
-for a machine-readable result.
+localhost needs `-allow-target` or `-yes`. A refused host makes the scenario
+not valid, even when the script catches the error. Any `check()` results are
+listed, and a failed check does not make the scenario invalid.
+
+When the error comes from a line of the scenario, `validate` names it, also
+for TypeScript and Python:
+
+```
+not valid: throw.vl.js (iteration)
+  js: Error: boom
+  at throw.vl.js:4:9
+```
+
+Add `-output json` for a machine-readable result. Besides `valid`, `stage`
+and `error`, it has `error_location` (`file`, `line`, `column`), `config`
+(the settings the iteration ran with, and the names of the data files and
+variables, never their values), `hosts` (the hosts the iteration reached) and
+`refused_hosts` (the hosts to approve with `-allow-target`). The hosts are
+those of this one iteration. See [Command reference](#command-reference)
+for every field.
 
 | Exit code | Meaning                          |
 |-----------|----------------------------------|
@@ -1173,9 +1191,8 @@ for a machine-readable result.
 | 1         | The scenario is not valid        |
 | 2         | Bad usage                        |
 
-From an agent, the `validate_scenario` tool does the same and returns
-`valid`, and for an invalid scenario the `stage` (`load` or `iteration`) and
-`error`.
+From an agent, the `validate_scenario` tool does the same and returns the
+same JSON. When a host is refused, the user is asked to approve it.
 
 ### Feed a scenario data and settings
 
@@ -1504,6 +1521,14 @@ Cursor afterward and the agent has nine tools — `create_scenario`,
 command shown above and parsing its `-output json` result; there is no
 agent-only path that skips the CLI.
 
+An agent cannot approve a host that is not localhost: `run_test` and
+`validate_scenario` have no `yes` or `allow_targets` argument. When a run
+reaches such a host, VegaLoad asks the user in the editor (MCP elicitation)
+and, only if they say yes, runs the same command again with `-allow-target`
+for that host. An editor that cannot ask gets an error with the exact
+`vegaload run ... -allow-target HOST ...` command for the user to run in a
+terminal.
+
 To set up only one editor, use `-editor`:
 
 ```
@@ -1547,7 +1572,9 @@ vegaload mcp serve -http 127.0.0.1:8765
 
 `POST /mcp` takes one JSON-RPC message and returns the answer. `GET /sse` opens
 a Server-Sent Events stream (MCP protocol 2024-11-05) and `POST /message` sends
-requests to it. On a loopback address no token is needed. On any other address
+requests to it. Only the stream can ask the user to approve a host (MCP
+elicitation); over `POST /mcp` a tool returns the command for the user to run
+instead. On a loopback address no token is needed. On any other address
 a token is required: put it in an environment variable and pass its name, for
 example `-token-env VEGALOAD_MCP_TOKEN`. Clients then send
 `Authorization: Bearer <token>`. Browser requests are refused unless their
@@ -1627,8 +1654,10 @@ The live view is on unless:
 
 This is the one exception to "nothing leaves your machine": the run's numbers,
 its thresholds, step and protocol names, labels and the target without
-credentials go to the live view service. Headers, request bodies, options,
-environment values, secrets and data cells are never sent.
+credentials go to the live view service, with the run's settings. The value
+of a header, an option or an environment variable, a request body, a secret
+and a data cell are never sent: the settings name them only by name, key,
+size or row count.
 
 The browser opens on every run, except with `-no-open`, `VEGALOAD_OPEN=off`, in
 CI, or on Linux with no display. `-no-open` now stops every browser tab
@@ -1656,8 +1685,9 @@ vegaload run -stream-file auto -run-id nightly-42 -label service=checkout -thres
 ```
 
 writes `.vegaload/runs/nightly-42.ndjson`: one JSON event per line
-(`run.started`, one `point` per second, then `run.finished` with the same JSON
-`-out` writes, plus `passed` and `exitCode`). `-stream-push URL` POSTs the same
+(`run.started` with the run's full settings in `definition`, one `point` per
+second, then `run.finished` with the same JSON `-out` writes, plus `passed`
+and `exitCode`). `-stream-push URL` POSTs the same
 events to an HTTP endpoint, with retry; the Bearer token comes from
 `VEGALOAD_STREAM_TOKEN`, and `http://` to a host that is not loopback is refused
 unless you pass `-stream-insecure`. The format is in
@@ -1767,10 +1797,21 @@ MySQL, Redis and SFTP.
 | `vegaload doctor`        | Check the CLI, agent hosts, and a target; `-fix` repairs what it can   |
 | `vegaload protocols`     | List the supported protocols, with options and examples               |
 | `vegaload live`          | Print or open this machine's live view page; `live reset` starts a new project |
+| `vegaload version`       | Print the version; `-output json` adds the stream schema and the feature list |
 
 Every command supports `-output text` (default), `json`, or (`run` only)
 `jsonl`. Run `vegaload <command> -h` for its full flag list, or `vegaload
 help` for the top-level summary.
+
+Exit codes are stable:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success. For `run`, the run finished and its thresholds and baseline gate, if any, passed |
+| 1 | Failure: `run` could not finish, `validate` found the scenario not valid, `compare` found a regression or could not read a report, `doctor` had a failed check, `init -status` found something missing, `mcp eval` had a failed case. Also no command, or one that does not exist |
+| 2 | Bad usage. For `run`, also a refused host (a `-target`, or a host a scenario calls), a shape above a hard cap, or a stream destination that breaks a rule. With `-output json`, a refused host prints `{"error", "refused_hosts"}` on stdout |
+| 3 | `run` only: a threshold or the baseline gate was breached, or `-abort-on-breach` stopped the run |
+| 130, 143 | `run` with a stream or the live view, stopped by Ctrl-C (SIGINT) or SIGTERM |
 
 ## Use in Kubernetes
 

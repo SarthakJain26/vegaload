@@ -453,7 +453,7 @@ func TestBuildSafetyCheck_AllowTargetAllowsListedHost(t *testing.T) {
 	}
 }
 
-func TestRunScenario_ScriptedJS_DisallowedHostHardFailsWithoutYes(t *testing.T) {
+func TestRunScenario_ScriptedJS_DisallowedHostStopsWithoutYes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should never be reached when the per-call safety gate refuses the host")
 	}))
@@ -481,23 +481,43 @@ func TestRunScenario_ScriptedJS_DisallowedHostHardFailsWithoutYes(t *testing.T) 
 		Timeout:      time.Second,
 	}
 
+	start := time.Now()
 	result, err := runScenario(cfg)
-	if err != nil {
-		t.Fatalf("runScenario returned a hard error: %v (expected the per-iteration failure to be recorded instead)", err)
+	assertStoppedAtRefusedHost(t, result, err, "example.com")
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("the run took %s; it should stop at the first refused call", time.Since(start))
 	}
-	assertEveryIterationRefused(t, result)
 }
 
-// assertEveryIterationRefused checks a run whose only call the safety gate
-// refused: every iteration failed, and a refused call is not a request.
-func assertEveryIterationRefused(t *testing.T, result *report.Result) {
+// assertStoppedAtRefusedHost checks a run whose call the safety gate refused:
+// it stops with no result, and the error lists the host for a person to approve.
+func assertStoppedAtRefusedHost(t *testing.T, result *report.Result, err error, host string) {
 	t.Helper()
-	it := result.Iterations
-	if it == nil || it.Total == 0 || it.Failed != it.Total {
-		t.Errorf("Iterations = %+v, expected every iteration to fail: the safety gate should have refused the disallowed host", it)
+	if result != nil {
+		t.Errorf("result = %+v, want none: the run stops at a refused host", result)
 	}
-	if result.Total != 0 {
-		t.Errorf("Total = %d, want 0: a refused call is not sent, so it is not a request", result.Total)
+	if got := refusedHosts(err); len(got) != 1 || got[0] != host {
+		t.Fatalf("refused hosts = %v (error %v), want [%s]", got, err, host)
+	}
+	if !strings.Contains(err.Error(), `host "`+host+`" is not localhost or allowlisted`) {
+		t.Errorf("error %q does not name the host", err)
+	}
+}
+
+// A scenario run that is refused a host is stopped long before its duration,
+// with the refused host in the error.
+func TestRunScenario_RefusedHostStopsTheRun(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scenario.vl.js")
+	src := `export default function () { http.get("http://example.com/"); }`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &runConfig{Executor: "fixed-vus", VUs: 2, Duration: 30 * time.Second, ScenarioPath: path, Timeout: time.Second}
+	start := time.Now()
+	result, err := runScenario(cfg)
+	assertStoppedAtRefusedHost(t, result, err, "example.com")
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("the run took %s of its 30s", d)
 	}
 }
 
@@ -567,8 +587,5 @@ func TestRunScenario_ScriptedPython_SafetyGateWiredThrough(t *testing.T) {
 	}
 
 	result, err := runScenario(cfg)
-	if err != nil {
-		t.Fatalf("runScenario returned a hard error: %v", err)
-	}
-	assertEveryIterationRefused(t, result)
+	assertStoppedAtRefusedHost(t, result, err, "example.com")
 }

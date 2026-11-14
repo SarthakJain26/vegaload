@@ -583,3 +583,48 @@ def iteration():
 		t.Fatalf("Iteration returned error: %v", err)
 	}
 }
+
+// ErrorLocation names the line of the scenario file that raised, or that has
+// the syntax error, and never a line of another module.
+func TestErrorLocation(t *testing.T) {
+	skipIfNoPython(t)
+	cases := []struct {
+		name, src  string
+		line       int
+		wantColumn bool
+		atLoad     bool
+	}{
+		{"raise", "import json\n\ndef iteration():\n    raise ValueError(\"x\")\n", 4, false, false},
+		{"nested", "def inner():\n    return {}[\"missing\"]\n\ndef iteration():\n    inner()\n", 2, false, false},
+		{"in another module", "import json\n\ndef iteration():\n    json.loads(\"{\")\n", 4, false, false},
+		{"syntax", "def iteration(:\n    pass\n", 1, true, true},
+		{"top level", "x = 1\nraise RuntimeError(\"top\")\n\ndef iteration():\n    pass\n", 2, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "s.py")
+			if err := os.WriteFile(path, []byte(tc.src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			script, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vu, err := script.NewVU(nil, time.Second)
+			if tc.atLoad != (err != nil) {
+				t.Fatalf("NewVU error %v, want one: %v", err, tc.atLoad)
+			}
+			if err == nil {
+				defer vu.Close()
+				err = vu.Iteration(context.Background())
+			}
+			line, col, ok := ErrorLocation(err)
+			if !ok || line != tc.line || (tc.wantColumn && col == 0) {
+				t.Fatalf("location %d:%d (ok %v), want line %d; error %v", line, col, ok, tc.line, err)
+			}
+		})
+	}
+	if _, _, ok := ErrorLocation(errors.New("plain")); ok {
+		t.Fatal("a plain error has a location")
+	}
+}

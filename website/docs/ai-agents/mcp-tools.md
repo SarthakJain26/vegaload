@@ -13,7 +13,7 @@ The VegaLoad MCP server has nine tools. Each one is a thin wrapper around a comm
 | `list_protocols` | Lists the 14 protocols, with options and examples. The agent calls it before it picks a protocol. | `vegaload protocols` |
 | `create_scenario` | Writes a new scenario file. JavaScript by default, or Python. | `vegaload new` |
 | `generate_from_spec` | Writes a scenario and a runbook from a JSON OpenAPI file. Each operation is a named step. YAML is not supported. | `vegaload new -from-openapi` |
-| `validate_scenario` | Runs a scenario once with one user. Returns `valid`, and the `stage` and `error` if not. It makes real calls. | `vegaload validate` |
+| `validate_scenario` | Runs a scenario once with one user. Returns `valid`, the settings, the hosts it reached, and the `stage`, `error` and `error_location` if not. It makes real calls. | `vegaload validate` |
 | `run_test` | Runs a load test, from a scenario file or from a target and a protocol. Returns the result and the path to an HTML report. | `vegaload run` |
 | `get_results` | Reads back a JSON report from an earlier run. | |
 | `suggest_thresholds` | Suggests p95 and error rate limits from a baseline report. | `vegaload diagnose -no-llm` |
@@ -30,11 +30,11 @@ It also takes `live`, `no-live` and `no-open`, and `stream_file`, `stream_push`,
 
 A threshold breach is a normal result with `thresholds_passed` set to false. It is not a tool error. From a terminal, the same run exits 3.
 
-A target that is not localhost is refused unless it is in `allow_targets`, or `yes` is true. See [Safety](/ai-agents/safety).
+A host that is not localhost needs your approval. The agent cannot give it: there is no `yes` or `allow_targets` argument. VegaLoad asks you in the agent host, and runs the same command again with `-allow-target` only if you say yes. If the agent host cannot ask, the tool returns the command for you to run in a terminal. See [Safety](/ai-agents/safety).
 
 ## About `validate_scenario`
 
-Call it after you write or edit a scenario, and before `run_test`. A scenario that is not valid is a normal result. Read `valid` first. A failed `check()` does not make a scenario invalid.
+Call it after you write or edit a scenario, and before `run_test`. A scenario that is not valid is a normal result. Read `valid` first. A failed `check()` does not make a scenario invalid. When the error comes from a line of the scenario, `error_location` has its `file`, `line` and `column`. A host that is not localhost needs your approval, as for `run_test`.
 
 ## Where the list comes from
 

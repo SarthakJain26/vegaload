@@ -56,6 +56,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -112,9 +113,28 @@ func findInterpreter() (pyfind.Interpreter, error) {
 // See the package doc comment for a worked example and VU.Iteration for
 // the Go side of this same protocol.
 const harnessTemplate = `
-import sys, json, runpy, itertools, time
+import sys, json, runpy, itertools, time, os, traceback
 
 _next_id = itertools.count(1)
+
+def _where(e):
+    """The line, and the column when Python knows it, in the scenario file
+    that e came from: a SyntaxError in it, or the innermost traceback frame
+    that runs its code. Empty when the error did not come from the file."""
+    try:
+        target = os.path.abspath(sys.argv[1])
+        if isinstance(e, SyntaxError) and e.filename and e.lineno and os.path.abspath(e.filename) == target:
+            return {"line": e.lineno, "column": e.offset or 0}
+        found = None
+        for fs in traceback.extract_tb(e.__traceback__):
+            if os.path.abspath(fs.filename) == target:
+                found = fs
+        if found is not None and found.lineno:
+            col = getattr(found, "colno", None)
+            return {"line": found.lineno, "column": col + 1 if col is not None else 0}
+    except Exception:
+        pass
+    return {}
 
 def _send(msg):
     sys.stdout.write(json.dumps(msg) + "\n")
@@ -378,16 +398,20 @@ def step(name, fn=None):
     with s:
         return fn()
 
-def _respond_ready(ok, error=None):
+def _respond_ready(ok, error=None, where=None):
     msg = {"type": "ready", "ok": ok}
     if error is not None:
         msg["error"] = error
+    if where:
+        msg.update(where)
     _send(msg)
 
-def _respond_result(ok, error=None):
+def _respond_result(ok, error=None, where=None):
     msg = {"type": "result", "ok": ok}
     if error is not None:
         msg["error"] = error
+    if where:
+        msg.update(where)
     _send(msg)
 
 def main():
@@ -399,7 +423,7 @@ def main():
             run_name="__vegaload_scenario__",
         )
     except BaseException as e:
-        _respond_ready(False, "loading script: %s: %s" % (type(e).__name__, e))
+        _respond_ready(False, "loading script: %s: %s" % (type(e).__name__, e), _where(e))
         sys.exit(1)
 
     iteration = module_globals.get("iteration")
@@ -425,7 +449,7 @@ def main():
             iteration()
             _respond_result(True)
         except BaseException as e:
-            _respond_result(False, "%s: %s" % (type(e).__name__, e))
+            _respond_result(False, "%s: %s" % (type(e).__name__, e), _where(e))
 
 main()
 `
@@ -467,6 +491,10 @@ type message struct {
 	Type  string `json:"type"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
+	// Line and Column are where in the scenario file a failed "ready" or
+	// "result" came from; 0 when not known.
+	Line   int `json:"line"`
+	Column int `json:"column"`
 
 	// Present on a "call" message.
 	ID       int               `json:"id"`
@@ -631,10 +659,43 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 	}
 	if !msg.OK {
 		_ = vu.Close()
-		return nil, fmt.Errorf("python: %s", msg.Error)
+		return nil, msg.scriptError()
 	}
 
 	return vu, nil
+}
+
+// locatedError is an error with the line and column in the scenario file it
+// came from.
+type locatedError struct {
+	err          error
+	line, column int
+}
+
+func (e *locatedError) Error() string { return e.err.Error() }
+func (e *locatedError) Unwrap() error { return e.err }
+
+// scriptError is the error of a failed "ready" or "result" message, with
+// its place in the scenario file when the harness sent one.
+func (m message) scriptError() error {
+	err := fmt.Errorf("python: %s", m.Error)
+	if m.Line <= 0 {
+		return err
+	}
+	return &locatedError{err: err, line: m.Line, column: m.Column}
+}
+
+// ErrorLocation returns the line and column in the scenario file that err
+// (from NewVU or Iteration) came from: a syntax error in it, or the innermost
+// traceback line of it that was running when an exception was raised. The
+// column is 0 when Python does not report one. ok is false when the error
+// did not come from the file.
+func ErrorLocation(err error) (line, column int, ok bool) {
+	var le *locatedError
+	if errors.As(err, &le) {
+		return le.line, le.column, true
+	}
+	return 0, 0, false
 }
 
 // readMessage reads and parses one protocol line from the interpreter.
@@ -728,7 +789,7 @@ func (v *VU) Iteration(ctx context.Context) error {
 		switch msg.Type {
 		case "result":
 			if !msg.OK {
-				return fmt.Errorf("python: %s", msg.Error)
+				return msg.scriptError()
 			}
 			return nil
 		case "call":

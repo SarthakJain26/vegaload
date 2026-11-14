@@ -44,7 +44,7 @@ Delivery is at least once. A consumer dedupes on `(runId, seq)`. Unknown fields 
 | `run.finished` | Last event of a run that ran to its end, passed or not. |
 | `run.failed` | Last event of a run that could not run or was interrupted. |
 
-Every stream ends with exactly one of `run.finished` or `run.failed`, including on Ctrl-C (the process then exits 130 for SIGINT, or 143 for SIGTERM, as a process killed by that signal would). A run that VegaLoad refuses before it starts (a host that is not allowed, a flag that is not valid, a bad `-run-id`) sends no stream at all. A run whose scenario cannot be loaded or started sends `run.started` and then `run.failed`.
+Every stream ends with exactly one of `run.finished` or `run.failed`, including on Ctrl-C (the process then exits 130 for SIGINT, or 143 for SIGTERM, as a process killed by that signal would). A run that VegaLoad refuses before it starts (a `-target` that is not allowed, a flag that is not valid, a bad `-run-id`) sends no stream at all. A run whose scenario cannot be loaded or started sends `run.started` and then `run.failed`. So does a scenario run that calls a host that is not allowed: it stops at that call, and the `reason` names the host.
 
 ### `run.started`
 
@@ -60,8 +60,27 @@ Every stream ends with exactly one of `run.finished` or `run.failed`, including 
 | `thresholds` | array | The pass/fail limits: `{ "name", "metric", "operator", "value", "step"?, "protocol"?, "op"? }`, as the run was given them. |
 | `abortOnBreach` | boolean | True with `-abort-on-breach`. |
 | `version` | string | VegaLoad version. |
+| `definition` | object | The full resolved test definition, below. Added after the first version of this contract; a reader that does not know it ignores it, and the fields above keep their meaning. |
 
-Nothing that came from `-header`, `-body`, `-opt`, `-secret-env`, `-env` or a data file is ever sent.
+`definition` is every setting the run started with, after defaults were applied:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `executor` | string | As above. |
+| `vus`, `maxVUs`, `rate` | number | `-vus`, `-max-vus` and `-rate` as given (after defaults). Optional. |
+| `duration` | string | Planned length. |
+| `stages` | array | `-stages` as given. Optional. |
+| `timeout` | string | The time limit of each call, `-timeout`. |
+| `scenario` | object | `{ "file", "language" }`: the scenario's base name, and `javascript`, `typescript` or `python`. Scenario runs only. |
+| `request` | object | Protocol-direct runs only: `{ "protocol", "target", "method"?, "optionKeys"?, "headerNames"?, "bodyBytes"?, "insecure"? }`. `target` has no credentials or query, as above. `optionKeys` are the `-opt` keys and `headerNames` the `-header` names, sorted; `bodyBytes` is the length of `-body`. |
+| `thresholds` | array | As above. |
+| `abortOnBreach`, `abortGrace` | boolean, string | `-abort-on-breach`, and the warm-up it uses (the automatic one when `-abort-grace` is not given). |
+| `baseline` | object | `{ "file", "maxRegressionPercent" }`: the base name of `-baseline`. Optional. |
+| `dataFiles` | array | `{ "name", "file", "rows" }` for each `-data` file: the name a scenario reads as `data.NAME`, the file's base name, and its row count. |
+| `env`, `secretEnv` | array | The names given with `-env` and `-secret-env`. |
+| `labels` | object | The `-label` values, also on the envelope. |
+
+No value that came from `-header`, `-body`, `-opt`, `-secret-env`, `-env` or a data file is ever sent: only the names, keys, sizes and counts listed here.
 
 ### `point`
 
@@ -141,7 +160,7 @@ Push batches follow the same rules as litmus-lite's: `POST` with `Content-Type: 
 - The browser does not open with `-no-open`, `VEGALOAD_OPEN=off`, in CI, or on Linux with no display. `-no-open` already stops the HTML report from opening; it now stops every browser tab VegaLoad would open. When the live view is on, the HTML report (still written) is not opened as well, whether or not the page itself opens. A run started by an agent (`-trigger` starting with `mcp`) never opens the HTML report.
 - Remote `http://` is refused as for any push.
 - `vegaload live [-open]` prints (or opens) the project page. `vegaload live reset` makes a new project.
-- This is a deliberate exception to "nothing leaves the machine by default": the run (its numbers, thresholds, step and protocol names, labels, target without credentials) goes to the live-view service. `-no-live` and `VEGALOAD_LIVE=off` turn it off.
+- This is a deliberate exception to "nothing leaves the machine by default": the run (its numbers, thresholds, step and protocol names, labels, target without credentials, and the `definition` of `run.started`) goes to the live-view service. `-no-live` and `VEGALOAD_LIVE=off` turn it off.
 
 ## From an agent (MCP)
 

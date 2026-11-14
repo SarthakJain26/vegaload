@@ -426,7 +426,72 @@ func buildRunStarted(cfg *runConfig, executor string, duration time.Duration) st
 			Step: t.Step, Protocol: t.Protocol, Op: t.Op,
 		})
 	}
+	rs.Definition = buildDefinition(cfg, executor, duration, rs.Thresholds)
 	return rs
+}
+
+// buildDefinition is the resolved test definition for run.started. Of the
+// options, headers, body, environment and data it reads only keys, names,
+// sizes and counts (docs/streaming.md).
+func buildDefinition(cfg *runConfig, executor string, duration time.Duration, thresholds []stream.ThresholdSpec) *stream.Definition {
+	def := &stream.Definition{
+		Executor:      executor,
+		VUs:           cfg.VUs,
+		MaxVUs:        cfg.MaxVUs,
+		Rate:          cfg.Rate,
+		Duration:      duration.String(),
+		Timeout:       cfg.Timeout.String(),
+		Thresholds:    thresholds,
+		AbortOnBreach: cfg.AbortOnBreach,
+		Env:           cfg.inputNames.Env,
+		SecretEnv:     cfg.inputNames.SecretEnv,
+	}
+	for _, s := range cfg.Stages {
+		def.Stages = append(def.Stages, stream.Stage{Target: s.Target, Duration: s.Duration.String()})
+	}
+	if cfg.ScenarioPath != "" {
+		def.Scenario = &stream.ScenarioDef{File: filepath.Base(cfg.ScenarioPath), Language: scenarioLanguage(cfg.ScenarioPath)}
+	} else {
+		def.Request = &stream.RequestDef{
+			Protocol:    cfg.Protocol,
+			Target:      stream.SanitizeTarget(cfg.Target.URL),
+			Method:      cfg.Target.Method,
+			OptionKeys:  sortedNames(cfg.Target.Options),
+			HeaderNames: sortedNames(cfg.Target.Headers),
+			BodyBytes:   len(cfg.Target.Body),
+			Insecure:    cfg.Target.InsecureSkipVerify,
+		}
+	}
+	if cfg.AbortOnBreach {
+		grace := cfg.AbortGrace
+		if !cfg.AbortGraceSet {
+			grace = autoGrace(duration)
+		}
+		def.AbortGrace = grace.String()
+	}
+	if cfg.BaselinePath != "" {
+		def.Baseline = &stream.BaselineDef{File: filepath.Base(cfg.BaselinePath), MaxRegressionPercent: cfg.MaxRegression}
+	}
+	for _, f := range cfg.inputNames.Data {
+		def.DataFiles = append(def.DataFiles, stream.DataFileDef{Name: f.Name, File: f.File, Rows: f.Rows})
+	}
+	if len(cfg.Stream.labels) > 0 {
+		def.Labels = map[string]string(cfg.Stream.labels)
+	}
+	return def
+}
+
+// scenarioLanguage names the language a scenario file is run as, by its
+// extension, the same rule scriptedIteration and js.Load follow.
+func scenarioLanguage(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".py":
+		return "python"
+	case ".ts", ".tsx":
+		return "typescript"
+	default:
+		return "javascript"
+	}
 }
 
 // runOutcome is what the run produced, for the end of the stream.

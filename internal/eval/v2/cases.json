@@ -30,7 +30,6 @@
         "protocol": "http1",
         "vus": 1,
         "duration": "1s",
-        "yes": true,
         "no_report": true
       }
     },
@@ -138,6 +137,17 @@
       }
     },
     {
+      "name": "run_test refuses yes: only a person can approve a host",
+      "tool": "run_test",
+      "arguments": {
+        "target": "https://staging.example.com/",
+        "protocol": "http1",
+        "yes": true,
+        "no_report": true
+      },
+      "expect_error_contains": "cannot approve a host"
+    },
+    {
       "name": "validate_scenario requires scenario_path",
       "tool": "validate_scenario",
       "arguments": {},
@@ -151,7 +161,6 @@
         "protocol": "http1",
         "vus": 1,
         "duration": "1s",
-        "yes": true,
         "no_report": true,
         "baseline_path": "${WORKDIR}/fixture-report.json"
       },
@@ -167,7 +176,6 @@
         "protocol": "http1",
         "vus": 1,
         "duration": "1s",
-        "yes": true,
         "no_report": true,
         "baseline_path": "${WORKDIR}/no-such-report.json"
       },
@@ -181,7 +189,6 @@
         "protocol": "http1",
         "vus": 1,
         "duration": "1s",
-        "yes": true,
         "no_report": true,
         "junit_path": "${WORKDIR}/eval-junit.xml"
       },

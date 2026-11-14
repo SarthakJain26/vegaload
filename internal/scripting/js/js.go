@@ -52,6 +52,7 @@ import (
 
 	"github.com/dop251/goja"
 	"github.com/evanw/esbuild/pkg/api"
+	"github.com/go-sourcemap/sourcemap"
 
 	"github.com/vegaload/vegaload/internal/scripting/netapi"
 	"github.com/vegaload/vegaload/internal/secrets"
@@ -61,6 +62,7 @@ import (
 // into any number of VUs.
 type Script struct {
 	program *goja.Program
+	sm      *sourcemap.Consumer // transpiled code back to the file; may be nil
 }
 
 // Load reads and compiles the scenario file at path. A .ts, .tsx, or .jsx
@@ -75,7 +77,7 @@ func Load(path string) (*Script, error) {
 		return nil, fmt.Errorf("js: reading %s: %w", path, err)
 	}
 
-	code, err := transpile(path, src)
+	code, sm, err := transpile(path, src)
 	if err != nil {
 		return nil, fmt.Errorf("js: transpiling %s: %w", path, err)
 	}
@@ -85,7 +87,7 @@ func Load(path string) (*Script, error) {
 		return nil, fmt.Errorf("js: compiling %s: %w", path, err)
 	}
 
-	return &Script{program: program}, nil
+	return &Script{program: program, sm: sm}, nil
 }
 
 // transpile converts src to CommonJS JavaScript that Goja can run and
@@ -95,21 +97,80 @@ func Load(path string) (*Script, error) {
 // assignment this package's VU setup can read, so a .js file using ESM
 // export syntax (the only form this package documents) needs the same
 // pass a .ts file does.
-func transpile(path string, src []byte) (string, error) {
+//
+// It also returns the source map from the transpiled code back to src,
+// which ErrorLocation uses to name a line of the file the author wrote.
+func transpile(path string, src []byte) (string, *sourcemap.Consumer, error) {
 	result := api.Transform(string(src), api.TransformOptions{
-		Loader:     loaderFor(path),
-		Format:     api.FormatCommonJS,
-		Target:     api.ES2020,
-		Sourcefile: filepath.Base(path),
+		Loader:         loaderFor(path),
+		Format:         api.FormatCommonJS,
+		Target:         api.ES2020,
+		Sourcefile:     filepath.Base(path),
+		Sourcemap:      api.SourceMapExternal,
+		SourcesContent: api.SourcesContentExclude,
 	})
 	if len(result.Errors) > 0 {
 		msgs := make([]string, len(result.Errors))
 		for i, e := range result.Errors {
 			msgs[i] = e.Text
 		}
-		return "", errors.New(strings.Join(msgs, "; "))
+		err := errors.New(strings.Join(msgs, "; "))
+		if loc := result.Errors[0].Location; loc != nil && loc.Line > 0 {
+			// esbuild counts columns from 0.
+			return "", nil, &locatedError{err: err, line: loc.Line, column: loc.Column + 1}
+		}
+		return "", nil, err
 	}
-	return string(result.Code), nil
+	// Without a map an error still has its message, only not its place.
+	sm, _ := sourcemap.Parse("", result.Map)
+	return string(result.Code), sm, nil
+}
+
+// locatedError is an error with the place in the scenario file it came from:
+// a line and column known up front, or the stack of a thrown exception,
+// which is only turned into a position when someone asks (ErrorLocation).
+type locatedError struct {
+	err          error
+	line, column int
+	stack        []goja.StackFrame
+	sm           *sourcemap.Consumer
+}
+
+func (e *locatedError) Error() string { return e.err.Error() }
+func (e *locatedError) Unwrap() error { return e.err }
+
+// ErrorLocation returns the line and column in the scenario file that err
+// (from Load, NewVU or Iteration) came from: a syntax error, or the innermost
+// line of the script that was running when an exception was thrown, such as
+// the line of a call that failed. Positions are in the original file, also
+// for TypeScript. ok is false when the place is not known.
+func ErrorLocation(err error) (line, column int, ok bool) {
+	var le *locatedError
+	if !errors.As(err, &le) {
+		return 0, 0, false
+	}
+	if le.line > 0 {
+		return le.line, le.column, true
+	}
+	if le.sm == nil {
+		return 0, 0, false
+	}
+	for i := range le.stack {
+		f := &le.stack[i]
+		if f.SrcName() == "<native>" {
+			continue
+		}
+		pos := f.Position()
+		if pos.Line <= 0 {
+			continue
+		}
+		// The runtime counts columns from 1, a source map from 0. A frame
+		// with no mapping runs code esbuild added, not the author's.
+		if _, _, line, col, ok := le.sm.Source(pos.Line, pos.Column-1); ok && line > 0 {
+			return line, col + 1, true
+		}
+	}
+	return 0, 0, false
 }
 
 func loaderFor(path string) api.Loader {
@@ -135,6 +196,7 @@ func loaderFor(path string) api.Loader {
 type VU struct {
 	vm *goja.Runtime
 	fn goja.Callable
+	sm *sourcemap.Consumer // the Script's, for ErrorLocation
 
 	http        *netapi.HTTPClient
 	proto       *netapi.ProtoClient
@@ -251,8 +313,14 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 		return nil, fmt.Errorf("js: %w", err)
 	}
 
+	v.sm = s.sm
 	if _, err := vm.RunProgram(s.program); err != nil {
-		return nil, fmt.Errorf("js: running script: %w", err)
+		err = fmt.Errorf("js: running script: %w", err)
+		var ex *goja.Exception
+		if errors.As(err, &ex) {
+			return nil, &locatedError{err: err, stack: ex.Stack(), sm: s.sm}
+		}
+		return nil, err
 	}
 
 	// esbuild's CommonJS output does not assign properties onto the
@@ -710,7 +778,7 @@ func (v *VU) Iteration(ctx context.Context) error {
 
 	var jsErr *goja.Exception
 	if errors.As(err, &jsErr) {
-		return fmt.Errorf("js: %s", jsErr.Value().String())
+		return &locatedError{err: fmt.Errorf("js: %s", jsErr.Value().String()), stack: jsErr.Stack(), sm: v.sm}
 	}
 	return fmt.Errorf("js: %w", err)
 }

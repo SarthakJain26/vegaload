@@ -16,7 +16,7 @@
     {
       "name": "run_test against an unreachable loopback port still reports cleanly (per-iteration failures aren't a CLI error)",
       "tool": "run_test",
-      "arguments": {"target": "http://127.0.0.1:1", "protocol": "http1", "vus": 1, "duration": "1s", "yes": true, "no_report": true}
+      "arguments": {"target": "http://127.0.0.1:1", "protocol": "http1", "vus": 1, "duration": "1s", "no_report": true}
     },
     {
       "name": "get_results requires report_path",

@@ -334,7 +334,7 @@ func TestEventsNeverCarryCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"PASSWORDSECRET", "alice", "QUERYSECRET", "FRAGSECRET", "HEADERSECRET", "KEYSECRET", "BODYSECRET", "Authorization", "X-Api-Key"} {
+	for _, secret := range []string{"PASSWORDSECRET", "alice", "QUERYSECRET", "FRAGSECRET", "HEADERSECRET", "KEYSECRET", "BODYSECRET"} {
 		if strings.Contains(string(b), secret) {
 			t.Fatalf("%q is in the stream:\n%s", secret, b)
 		}
@@ -344,6 +344,21 @@ func TestEventsNeverCarryCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := dataOf(t, rec.Events[0])
+	// Header names appear only as the definition's list of names.
+	var withoutNames stream.RunStarted
+	if err := json.Unmarshal(rec.Events[0].Data, &withoutNames); err != nil {
+		t.Fatal(err)
+	}
+	if got := withoutNames.Definition.Request.HeaderNames; strings.Join(got, ",") != "Authorization,X-Api-Key" {
+		t.Fatalf("header names %v", got)
+	}
+	withoutNames.Definition.Request.HeaderNames = nil
+	rest, _ := json.Marshal(withoutNames)
+	for _, name := range []string{"Authorization", "X-Api-Key"} {
+		if strings.Contains(string(rest), name) {
+			t.Fatalf("%q is in run.started outside headerNames: %s", name, rest)
+		}
+	}
 	if tg := started["target"].(map[string]any); tg["baseUrl"] != "http://"+host+"/api" {
 		t.Fatalf("target %v", tg)
 	}
@@ -373,6 +388,102 @@ func TestRunStartedIsBuiltOnlyFromThePlan(t *testing.T) {
 	}
 	if rs.VUs != 10 || len(rs.Stages) != 2 || rs.Stages[0].Duration != "30s" || rs.Target.BaseURL != "redis://cache.internal:6379/0" {
 		t.Fatalf("%+v", rs)
+	}
+	req := rs.Definition.Request
+	if strings.Join(req.OptionKeys, ",") != "args,password" || strings.Join(req.HeaderNames, ",") != "Authorization" ||
+		req.BodyBytes != len("BODYSECRET") || req.Target != "redis://cache.internal:6379/0" {
+		t.Fatalf("definition request %+v", req)
+	}
+}
+
+// run.started carries the whole resolved definition, and of the options,
+// headers, environment, secrets and data only names, keys and counts: a run
+// with a secret in each of them streams none of the values.
+func TestRunStartedDefinitionHasNoValues(t *testing.T) {
+	clearStreamEnv(t)
+	srv := quietServer(t)
+	dir := t.TempDir()
+	t.Setenv("VL_PLAIN_ENV", "ENVVALUESECRET")
+	t.Setenv("VL_SECRET_ENV", "SECRETENVVALUE")
+	data := filepath.Join(dir, "users.csv")
+	if err := os.WriteFile(data, []byte("name,password\nann,CELLSECRET\nbob,CELLSECRET2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scenario := filepath.Join(dir, "flow.vl.js")
+	src := `export default function () { http.get("` + srv.URL + `/?k=" + env.VL_PLAIN_ENV + env.VL_SECRET_ENV + data.users.next().password); }`
+	if err := os.WriteFile(scenario, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A scenario run: environment, secrets and data.
+	scenarioFile := filepath.Join(dir, "scenario.ndjson")
+	if code := run([]string{"run", "-no-report", "-audit-log", filepath.Join(dir, "audit.log"), "-output", "json",
+		"-stream-file", scenarioFile, "-executor", "constant-arrival-rate", "-rate", "20", "-max-vus", "2", "-duration", "300ms", "-label", "team=load",
+		"-env", "VL_PLAIN_ENV", "-secret-env", "VL_SECRET_ENV", "-data", data,
+		"-threshold", "p95 < 10s", "-abort-on-breach", scenario}); code != 0 {
+		t.Fatalf("scenario run exit %d", code)
+	}
+	// A protocol-direct run: an option, a header and a body.
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer tlsSrv.Close()
+	tlsHost := strings.TrimPrefix(tlsSrv.URL, "https://")
+	protoFile := filepath.Join(dir, "proto.ndjson")
+	if code := run([]string{"run", "-no-report", "-audit-log", filepath.Join(dir, "audit.log"), "-output", "json",
+		"-stream-file", protoFile, "-executor", "constant-arrival-rate", "-rate", "20", "-max-vus", "2", "-duration", "300ms",
+		"-target", "https://u:URLPASSSECRET@" + tlsHost + "/?q=QUERYSECRET", "-protocol", "http1", "-method", "POST", "-insecure",
+		"-header", "X-Api-Key: HEADERVALUESECRET", "-body", "BODYVALUESECRET", "-opt", "tls_server_name=OPTVALUESECRET"}); code != 0 {
+		t.Fatalf("protocol run exit %d", code)
+	}
+
+	secrets := []string{"ENVVALUESECRET", "SECRETENVVALUE", "CELLSECRET", "URLPASSSECRET", "QUERYSECRET", "HEADERVALUESECRET", "BODYVALUESECRET", "OPTVALUESECRET"}
+	started := func(path string) (stream.RunStarted, string) {
+		t.Helper()
+		rec, err := stream.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Events[0].Type != stream.TypeRunStarted {
+			t.Fatalf("first event %s", rec.Events[0].Type)
+		}
+		raw := string(rec.Events[0].Data)
+		for _, s := range secrets {
+			if strings.Contains(raw, s) {
+				t.Fatalf("%q is in run.started: %s", s, raw)
+			}
+		}
+		var rs stream.RunStarted
+		if err := json.Unmarshal(rec.Events[0].Data, &rs); err != nil {
+			t.Fatal(err)
+		}
+		if rs.Definition == nil {
+			t.Fatalf("no definition in %s", raw)
+		}
+		return rs, raw
+	}
+
+	sc, raw := started(scenarioFile)
+	d := sc.Definition
+	if d.Executor != "constant-arrival-rate" || d.Rate != 20 || d.MaxVUs != 2 || d.Duration != "300ms" || d.Timeout != "30s" || !d.AbortOnBreach || d.AbortGrace == "" {
+		t.Fatalf("scenario definition %s", raw)
+	}
+	if d.Scenario == nil || d.Scenario.File != "flow.vl.js" || d.Scenario.Language != "javascript" || d.Request != nil {
+		t.Fatalf("scenario %s", raw)
+	}
+	if strings.Join(d.Env, ",") != "VL_PLAIN_ENV" || strings.Join(d.SecretEnv, ",") != "VL_SECRET_ENV" {
+		t.Fatalf("env names %s", raw)
+	}
+	if len(d.DataFiles) != 1 || d.DataFiles[0] != (stream.DataFileDef{Name: "users", File: "users.csv", Rows: 2}) {
+		t.Fatalf("data files %s", raw)
+	}
+	if d.Labels["team"] != "load" || len(d.Thresholds) != 1 || d.Thresholds[0].Metric != "p95" {
+		t.Fatalf("labels or thresholds %s", raw)
+	}
+
+	pr, raw := started(protoFile)
+	req := pr.Definition.Request
+	if req == nil || req.Protocol != "http1" || req.Target != "https://"+tlsHost+"/" || req.Method != "POST" || !req.Insecure ||
+		strings.Join(req.OptionKeys, ",") != "tls_server_name" || strings.Join(req.HeaderNames, ",") != "X-Api-Key" || req.BodyBytes != len("BODYVALUESECRET") {
+		t.Fatalf("protocol definition %s", raw)
 	}
 }
 

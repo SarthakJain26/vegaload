@@ -30,10 +30,13 @@ baselines. For a quick check that an API works under a few users, use the
   `secret_env` for tokens, it removes the value from all output). Pass `junit_path` to also write JUnit XML (one test case per
   threshold, check and baseline gate). Returns the run's results and, unless
   `no_report` is set, a path to a self-contained HTML report.
-  A non-localhost target that isn't in `allow_targets` is refused unless
-  `yes: true` is set — this MCP server has no terminal to prompt a human on,
-  so treat `yes` as a deliberate choice, and confirm with the user before
-  sending load at anything that isn't localhost or a target they named.
+  Only the user can approve a host that isn't localhost: there is no `yes`
+  or `allow_targets` argument, and a call with one is refused. When a run
+  reaches such a host, VegaLoad asks the user in the editor and reruns with
+  `-allow-target` only if they agree. If the tool returns an error with a
+  `vegaload run ... -allow-target HOST ...` command instead, show that command
+  to the user and ask them to run it in their terminal; do not retry. Do not
+  point load at anything that isn't localhost or a target the user named.
 - `get_results` — read back a previously-written report JSON file. It includes
   `protocols` when the run recorded calls. A script HTTP 4xx or 5xx counts as
   a success in that row.
@@ -53,7 +56,8 @@ baselines. For a quick check that an API works under a few users, use the
   (`vegaload protocols`). Call it before choosing a `protocol` value.
 - `validate_scenario` — run a scenario once, with one user, and report whether
   it works (`vegaload validate`). Makes real calls under the same host rules as
-  `run_test`. Returns `valid`, and when not valid, `stage` and `error`. Call it
+  `run_test`. Returns `valid`, and when not valid, `stage`, `error` and, when
+  known, `error_location` (`file`, `line`, `column`): fix that line. Call it
   before `run_test` on any new or edited scenario.
 
 Typical flow: generate_from_spec (if an OpenAPI spec was given) → validate_scenario → run_test →

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -201,5 +202,137 @@ func TestRecordAudit_WarningNamesTheCommand(t *testing.T) {
 	buf.ReadFrom(r)
 	if !strings.HasPrefix(buf.String(), "vegaload validate: warning") {
 		t.Fatalf("stderr = %q", buf.String())
+	}
+}
+
+func validateJSON(t *testing.T, args ...string) (int, validateResult) {
+	t.Helper()
+	code, out, errOut := validate(t, append([]string{"-output", "json"}, args...)...)
+	var res validateResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("not json: %q (stderr %q)", out, errOut)
+	}
+	return code, res
+}
+
+// The JSON names the resolved settings, the hosts reached, and of the inputs
+// only names and row counts.
+func TestValidate_JSONHasConfigAndHosts(t *testing.T) {
+	srv := okServer(t)
+	t.Setenv("VL_REGION", "eu-west-REGIONVALUE")
+	t.Setenv("VL_TOKEN", "TOKENVALUE")
+	data := writeScenario(t, "users.csv", "name\nann\nbob\ncy\n")
+	p := writeScenario(t, "ok.vl.js", `export default function () {
+  http.get("`+srv.URL+`/a");
+  http.get("http://localhost:`+strings.Split(srv.URL, ":")[2]+`/b");
+  http.get("`+srv.URL+`/c");
+}`)
+	code, res := validateJSON(t, "-timeout", "7s", "-env", "VL_REGION", "-secret-env", "VL_TOKEN", "-data", data, "-allow-target", "api.example.com", p)
+	if code != 0 || !res.Valid {
+		t.Fatalf("code=%d res=%+v", code, res)
+	}
+	c := res.Config
+	if c.Scenario != p || c.Language != "javascript" || c.Executor != "validate" || c.VUs != 1 || c.Iterations != 1 || c.Timeout != "7s" {
+		t.Fatalf("config %+v", c)
+	}
+	if strings.Join(c.Env, ",") != "VL_REGION" || strings.Join(c.SecretEnv, ",") != "VL_TOKEN" || strings.Join(c.AllowTargets, ",") != "api.example.com" {
+		t.Fatalf("config %+v", c)
+	}
+	if len(c.DataFiles) != 1 || c.DataFiles[0] != (inputFile{Name: "users", File: "users.csv", Rows: 3}) {
+		t.Fatalf("data files %+v", c.DataFiles)
+	}
+	if strings.Join(res.Hosts, ",") != "127.0.0.1,localhost" || len(res.RefusedHosts) != 0 {
+		t.Fatalf("hosts %v refused %v", res.Hosts, res.RefusedHosts)
+	}
+	_, raw, _ := validate(t, "-output", "json", "-env", "VL_REGION", "-secret-env", "VL_TOKEN", "-data", data, p)
+	for _, v := range []string{"REGIONVALUE", "TOKENVALUE", "ann", "bob"} {
+		if strings.Contains(raw, v) {
+			t.Fatalf("%q is in the output: %s", v, raw)
+		}
+	}
+}
+
+// A refused host is listed apart, and makes the scenario not valid even when
+// the script catches the refusal: a real run would stop at it.
+func TestValidate_RefusedHostsAreListed(t *testing.T) {
+	srv := okServer(t)
+	p := writeScenario(t, "far.vl.js", `export default function () {
+  http.get("`+srv.URL+`/");
+  try { http.get("http://Example.com/"); } catch (e) {}
+  try { http.get("http://example.com/again"); } catch (e) {}
+}`)
+	code, res := validateJSON(t, p)
+	if code != 1 || res.Valid || res.Stage != "iteration" || !strings.Contains(res.Error, `host "example.com" is not localhost or allowlisted`) {
+		t.Fatalf("code=%d res=%+v", code, res)
+	}
+	if strings.Join(res.Hosts, ",") != "127.0.0.1" || strings.Join(res.RefusedHosts, ",") != "example.com" {
+		t.Fatalf("hosts %v refused %v", res.Hosts, res.RefusedHosts)
+	}
+	if res.ErrorLocation != nil {
+		t.Fatalf("a caught refusal has no line: %+v", res.ErrorLocation)
+	}
+	code, res = validateJSON(t, "-allow-target", "example.com", "-timeout", "1ms", p)
+	if len(res.RefusedHosts) != 0 {
+		t.Fatalf("allowed host still refused: code=%d %+v", code, res)
+	}
+}
+
+// error_location points at the line and column of the scenario file the
+// error came from: a syntax error, a throw, a refused call, in JavaScript and
+// TypeScript, and is left out when the error is not from the file.
+func TestValidate_ErrorLocation(t *testing.T) {
+	cases := []struct {
+		name, file, src string
+		line, column    int
+	}{
+		{"syntax", "bad.vl.js", "export default function () {\n  const x = ;\n}\n", 2, 13},
+		{"throw", "throw.vl.js", "// one\nexport default function () {\n  const a = 1;\n  throw new Error(\"boom\");\n}\n", 4, 9},
+		{"refused call", "far.vl.js", "export default function () {\n  http.get(\"http://example.com/\");\n}\n", 2, 8},
+		{"typescript", "throw.ts", "interface A { n: number }\nconst a: A = { n: 1 };\nexport default function (): void {\n  if (a.n === 1) {\n    throw new Error(\"ts\");\n  }\n}\n", 5, 11},
+		{"top level", "top.vl.js", "const a = 1;\n\nthrow new Error(\"top\");\nexport default function () {}\n", 3, 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeScenario(t, tc.file, tc.src)
+			_, res := validateJSON(t, p)
+			want := errorLocation{File: p, Line: tc.line, Column: tc.column}
+			if res.Valid || res.ErrorLocation == nil || *res.ErrorLocation != want {
+				t.Fatalf("location %+v, want %+v (error %q)", res.ErrorLocation, want, res.Error)
+			}
+			_, text, _ := validate(t, p)
+			if !strings.Contains(text, "  at "+want.String()+"\n") {
+				t.Fatalf("text output %q has no location %s", text, want)
+			}
+		})
+	}
+
+	p := writeScenario(t, "noexport.vl.js", "const a = 1;\n")
+	if _, res := validateJSON(t, p); res.Valid || res.ErrorLocation != nil {
+		t.Fatalf("an error not from a line has no location: %+v", res)
+	}
+}
+
+func TestValidate_ErrorLocationPython(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	cases := []struct {
+		name, src  string
+		line       int
+		wantColumn bool
+	}{
+		{"raise", "import json\n\ndef iteration():\n    x = 1\n    raise ValueError(\"boom\")\n", 5, false},
+		{"syntax", "def iteration(:\n    pass\n", 1, true},
+		{"refused call", "def helper():\n    http.get(\"http://example.com/\")\n\ndef iteration():\n    helper()\n", 2, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeScenario(t, "s.py", tc.src)
+			_, res := validateJSON(t, p)
+			loc := res.ErrorLocation
+			if res.Valid || loc == nil || loc.File != p || loc.Line != tc.line || (tc.wantColumn && loc.Column == 0) {
+				t.Fatalf("location %+v, want line %d (error %q)", loc, tc.line, res.Error)
+			}
+		})
 	}
 }

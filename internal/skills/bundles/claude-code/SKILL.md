@@ -47,13 +47,15 @@ couldn't also do.
   self-contained HTML report you can open or point the user at. For a long
   run with `thresholds`, set `abort_on_breach: true` to stop it early once a
   threshold is broken beyond recovery; the result then has `aborted`.
-  **Safety gate**: a target that isn't localhost and isn't in `allow_targets`
-  is refused unless `yes: true` is set — there's no terminal here to prompt a
-  human for confirmation, so a deliberate `yes` (or an explicit allowlist) is
-  required before VegaLoad sends real load at someone else's server. Default
-  to a short run (`duration: "10s"`, modest `vus`) unless the user asks for
-  more, and always confirm with the user before pointing load at anything
-  that isn't localhost or a target they explicitly named.
+  **Safety gate**: only the user can approve a host that isn't localhost.
+  There is no `yes` or `allow_targets` argument, and a call with one is
+  refused. When a run reaches such a host, VegaLoad asks the user in the
+  editor and reruns with `-allow-target` only if they agree. If the tool
+  returns an error with a `vegaload run ... -allow-target HOST ...` command
+  instead, show it to the user and ask them to run it in their terminal; do
+  not retry. Default to a short run (`duration: "10s"`, modest `vus`) unless
+  the user asks for more, and do not point load at anything that isn't
+  localhost or a target the user explicitly named.
 - **get_results** — read back a report JSON file you already have a path for
   (from `run_test`'s `report_path`, or a file the user points you at). The
   report includes `protocols` when the run recorded calls.
@@ -80,7 +82,8 @@ couldn't also do.
 - **validate_scenario** — run a scenario once, with one user and one iteration,
   and report whether it works (`vegaload validate`). It makes real calls, under
   the same host rules as **run_test**. Returns `valid`, and when not valid, the
-  `stage` (`load` or `iteration`) and `error`. Call it after writing or editing
+  `stage` (`load` or `iteration`), `error` and, when known, `error_location`
+  (`file`, `line`, `column`): fix that line. Call it after writing or editing
   a scenario and before **run_test**. A failed `check()` does not make a
   scenario invalid.
 
